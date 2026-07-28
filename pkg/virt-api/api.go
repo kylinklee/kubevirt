@@ -1190,7 +1190,7 @@ func (app *virtAPIApp) Run() {
 	// Wire up health check trigger
 	kubeVirtInformer.SetWatchErrorHandler(func(r *cache.Reflector, err error) {
 		apiHealthVersion.Clear()
-		cache.DefaultWatchErrorHandler(context.TODO(), r, err)
+		cache.DefaultWatchErrorHandler(r, err)
 	})
 
 	kubeInformerFactory.ApiAuthConfigMap()

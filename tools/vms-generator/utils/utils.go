@@ -24,7 +24,7 @@ import (
 	"os"
 	"strings"
 
-	resourcev1 "k8s.io/api/resource/v1"
+	resourcev1alpha3 "k8s.io/api/resource/v1alpha3"
 
 	"k8s.io/apimachinery/pkg/util/rand"
 	"kubevirt.io/api/migrations/v1alpha1"
@@ -977,24 +977,22 @@ func GetVMIGPU() *v1.VirtualMachineInstance {
 	return vmi
 }
 
-func GetResourceClaimTemplatePGPU() *resourcev1.ResourceClaimTemplate {
-	return &resourcev1.ResourceClaimTemplate{
+func GetResourceClaimTemplatePGPU() *resourcev1alpha3.ResourceClaimTemplate {
+	return &resourcev1alpha3.ResourceClaimTemplate{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: resourcev1.SchemeGroupVersion.String(),
+			APIVersion: resourcev1alpha3.SchemeGroupVersion.String(),
 			Kind:       "ResourceClaimTemplate",
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name: ResourceClaimTemplatePGPU,
 		},
-		Spec: resourcev1.ResourceClaimTemplateSpec{
-			Spec: resourcev1.ResourceClaimSpec{
-				Devices: resourcev1.DeviceClaim{
-					Requests: []resourcev1.DeviceRequest{
+		Spec: resourcev1alpha3.ResourceClaimTemplateSpec{
+			Spec: resourcev1alpha3.ResourceClaimSpec{
+				Devices: resourcev1alpha3.DeviceClaim{
+					Requests: []resourcev1alpha3.DeviceRequest{
 						{
 							Name: DRARequestName,
-							Exactly: &resourcev1.ExactDeviceRequest{
-								DeviceClassName: "gpu.example.com",
-							},
+							DeviceClassName: "gpu.example.com",
 						},
 					},
 				},
