@@ -1,6 +1,3 @@
-// SPDX-FileCopyrightText: Copyright (c) 2015-2025 go-swagger maintainers
-// SPDX-License-Identifier: Apache-2.0
-
 package internal
 
 import (
@@ -14,11 +11,9 @@ const (
 	defaultHTTPSPort = ":443"
 )
 
-// Regular expressions used by the normalizations.
-var (
-	rxPort       = regexp.MustCompile(`(:\d+)/?$`)
-	rxDupSlashes = regexp.MustCompile(`/{2,}`)
-)
+// Regular expressions used by the normalizations
+var rxPort = regexp.MustCompile(`(:\d+)/?$`)
+var rxDupSlashes = regexp.MustCompile(`/{2,}`)
 
 // NormalizeURL will normalize the specified URL
 // This was added to replace a previous call to the no longer maintained purell library:
@@ -31,16 +26,11 @@ var (
 //   - FlagLowercaseHost
 //   - FlagRemoveDefaultPort
 //   - FlagRemoveDuplicateSlashes (and this was mixed in with the |)
-//
-// This also normalizes the URL into its urlencoded form by removing RawPath and RawFragment.
 func NormalizeURL(u *url.URL) {
 	lowercaseScheme(u)
 	lowercaseHost(u)
 	removeDefaultPort(u)
 	removeDuplicateSlashes(u)
-
-	u.RawPath = ""
-	u.RawFragment = ""
 }
 
 func lowercaseScheme(u *url.URL) {

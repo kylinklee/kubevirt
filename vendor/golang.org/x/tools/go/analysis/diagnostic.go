@@ -33,9 +33,8 @@ type Diagnostic struct {
 	URL string
 
 	// SuggestedFixes is an optional list of fixes to address the
-	// problem described by the diagnostic. Each one represents an
-	// alternative strategy, and should have a distinct and
-	// descriptive message; at most one may be applied.
+	// problem described by the diagnostic. Each one represents
+	// an alternative strategy; at most one may be applied.
 	//
 	// Fixes for different diagnostics should be treated as
 	// independent changes to the same baseline file state,
@@ -66,9 +65,7 @@ type RelatedInformation struct {
 // user can choose to apply to their code. Usually the SuggestedFix is
 // meant to fix the issue flagged by the diagnostic.
 //
-// The TextEdits must not overlap, nor contain edits for other
-// packages. Edits need not be totally ordered, but the order
-// determines how insertions at the same point will be applied.
+// The TextEdits must not overlap, nor contain edits for other packages.
 type SuggestedFix struct {
 	// A verb phrase describing the fix, to be shown to
 	// a user trying to decide whether to accept it.

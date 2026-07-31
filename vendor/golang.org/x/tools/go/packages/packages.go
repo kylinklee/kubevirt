@@ -59,10 +59,10 @@ import (
 //
 // Unfortunately there are a number of open bugs related to
 // interactions among the LoadMode bits:
-//   - https://go.dev/issue/56633
-//   - https://go.dev/issue/56677
-//   - https://go.dev/issue/58726
-//   - https://go.dev/issue/63517
+//   - https://github.com/golang/go/issues/56633
+//   - https://github.com/golang/go/issues/56677
+//   - https://github.com/golang/go/issues/58726
+//   - https://github.com/golang/go/issues/63517
 type LoadMode int
 
 const (
@@ -118,9 +118,6 @@ const (
 	// NeedEmbedPatterns adds EmbedPatterns.
 	NeedEmbedPatterns
 
-	// NeedTarget adds Target.
-	NeedTarget
-
 	// Be sure to update loadmode_string.go when adding new items!
 )
 
@@ -141,8 +138,6 @@ const (
 	LoadAllSyntax = LoadSyntax | NeedDeps
 
 	// Deprecated: NeedExportsFile is a historical misspelling of NeedExportFile.
-	//
-	//go:fix inline
 	NeedExportsFile = NeedExportFile
 )
 
@@ -163,7 +158,7 @@ type Config struct {
 	// If the user provides a logger, debug logging is enabled.
 	// If the GOPACKAGESDEBUG environment variable is set to true,
 	// but the logger is nil, default to log.Printf.
-	Logf func(format string, args ...any)
+	Logf func(format string, args ...interface{})
 
 	// Dir is the directory in which to run the build system's query tool
 	// that provides information about the packages.
@@ -229,6 +224,14 @@ type Config struct {
 	// consistent package metadata about unsaved files. However,
 	// drivers may vary in their level of support for overlays.
 	Overlay map[string][]byte
+
+	// -- Hidden configuration fields only for use in x/tools --
+
+	// modFile will be used for -modfile in go command invocations.
+	modFile string
+
+	// modFlag will be used for -modfile in go command invocations.
+	modFlag string
 }
 
 // Load loads and returns the Go packages named by the given patterns.
@@ -476,10 +479,6 @@ type Package struct {
 	// information for the package as provided by the build system.
 	ExportFile string
 
-	// Target is the absolute install path of the .a file, for libraries,
-	// and of the executable file, for binaries.
-	Target string
-
 	// Imports maps import paths appearing in the package's Go source files
 	// to corresponding loaded Packages.
 	Imports map[string]*Package
@@ -558,8 +557,14 @@ type ModuleError struct {
 }
 
 func init() {
-	packagesinternal.GetDepsErrors = func(p any) []*packagesinternal.PackageError {
+	packagesinternal.GetDepsErrors = func(p interface{}) []*packagesinternal.PackageError {
 		return p.(*Package).depsErrors
+	}
+	packagesinternal.SetModFile = func(config interface{}, value string) {
+		config.(*Config).modFile = value
+	}
+	packagesinternal.SetModFlag = func(config interface{}, value string) {
+		config.(*Config).modFlag = value
 	}
 	packagesinternal.TypecheckCgo = int(typecheckCgo)
 	packagesinternal.DepsErrors = int(needInternalDepsErrors)
@@ -727,7 +732,7 @@ func newLoader(cfg *Config) *loader {
 		if debug {
 			ld.Config.Logf = log.Printf
 		} else {
-			ld.Config.Logf = func(format string, args ...any) {}
+			ld.Config.Logf = func(format string, args ...interface{}) {}
 		}
 	}
 	if ld.Config.Mode == 0 {
@@ -1027,15 +1032,11 @@ func (ld *loader) refine(response *DriverResponse) ([]*Package, error) {
 // Precondition: ld.Mode&(NeedSyntax|NeedTypes|NeedTypesInfo) != 0.
 func (ld *loader) loadPackage(lpkg *loaderPackage) {
 	if lpkg.PkgPath == "unsafe" {
-		// To avoid surprises, fill in the blanks consistent
-		// with other packages. (For example, some analyzers
-		// assert that each needed types.Info map is non-nil
-		// even when there is no syntax that would cause them
-		// to consult the map.)
+		// Fill in the blanks to avoid surprises.
 		lpkg.Types = types.Unsafe
 		lpkg.Fset = ld.Fset
 		lpkg.Syntax = []*ast.File{}
-		lpkg.TypesInfo = ld.newTypesInfo()
+		lpkg.TypesInfo = new(types.Info)
 		lpkg.TypesSizes = ld.sizes
 		return
 	}
@@ -1184,7 +1185,20 @@ func (ld *loader) loadPackage(lpkg *loaderPackage) {
 		return
 	}
 
-	lpkg.TypesInfo = ld.newTypesInfo()
+	// Populate TypesInfo only if needed, as it
+	// causes the type checker to work much harder.
+	if ld.Config.Mode&NeedTypesInfo != 0 {
+		lpkg.TypesInfo = &types.Info{
+			Types:        make(map[ast.Expr]types.TypeAndValue),
+			Defs:         make(map[*ast.Ident]types.Object),
+			Uses:         make(map[*ast.Ident]types.Object),
+			Implicits:    make(map[ast.Node]types.Object),
+			Instances:    make(map[*ast.Ident]types.Instance),
+			Scopes:       make(map[ast.Node]*types.Scope),
+			Selections:   make(map[*ast.SelectorExpr]*types.Selection),
+			FileVersions: make(map[*ast.File]string),
+		}
+	}
 	lpkg.TypesSizes = ld.sizes
 
 	importer := importerFunc(func(path string) (*types.Package, error) {
@@ -1296,24 +1310,6 @@ func (ld *loader) loadPackage(lpkg *loaderPackage) {
 		}
 	}
 	lpkg.IllTyped = illTyped
-}
-
-func (ld *loader) newTypesInfo() *types.Info {
-	// Populate TypesInfo only if needed, as it
-	// causes the type checker to work much harder.
-	if ld.Config.Mode&NeedTypesInfo == 0 {
-		return nil
-	}
-	return &types.Info{
-		Types:        make(map[ast.Expr]types.TypeAndValue),
-		Defs:         make(map[*ast.Ident]types.Object),
-		Uses:         make(map[*ast.Ident]types.Object),
-		Implicits:    make(map[ast.Node]types.Object),
-		Instances:    make(map[*ast.Ident]types.Instance),
-		Scopes:       make(map[ast.Node]*types.Scope),
-		Selections:   make(map[*ast.SelectorExpr]*types.Selection),
-		FileVersions: make(map[*ast.File]string),
-	}
 }
 
 // An importFunc is an implementation of the single-method

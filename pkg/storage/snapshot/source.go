@@ -24,8 +24,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
-	"slices"
 	"strings"
 	"time"
 
@@ -176,7 +174,7 @@ func (s *vmSnapshotSource) Lock() (bool, error) {
 		}
 
 		if len(pods) > 0 {
-			s.state.lockMsg += fmt.Sprintf(" source is offline but %d pods using PVCs %+v", len(pods), slices.Collect(maps.Keys(pvcNames)))
+			s.state.lockMsg += fmt.Sprintf(" source is offline but %d pods using PVCs %+v", len(pods), func() []string { keys := make([]string, 0, len(pvcNames)); for k := range pvcNames { keys = append(keys, k) }; return keys }())
 			log.Log.V(3).Info(s.state.lockMsg)
 			return false, nil
 		}
