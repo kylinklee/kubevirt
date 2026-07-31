@@ -1190,7 +1190,7 @@ func (app *virtAPIApp) Run() {
 	// Wire up health check trigger
 	kubeVirtInformer.SetWatchErrorHandler(func(r *cache.Reflector, err error) {
 		apiHealthVersion.Clear()
-		cache.DefaultWatchErrorHandler(context.TODO(), r, err)
+		cache.DefaultWatchErrorHandler(r, err) // [K8s 1.31兼容] K8s 1.34签名含ctx参数，1.31不含，去掉context.TODO()
 	})
 
 	kubeInformerFactory.ApiAuthConfigMap()

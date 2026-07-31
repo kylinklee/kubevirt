@@ -90,7 +90,7 @@ func setConfigDefaults(config *rest.Config) error {
 	gv := migrationsv1alpha1.SchemeGroupVersion
 	config.GroupVersion = &gv
 	config.APIPath = "/apis"
-	config.NegotiatedSerializer = rest.CodecFactoryForGeneratedClient(scheme.Scheme, scheme.Codecs).WithoutConversion()
+	config.NegotiatedSerializer = scheme.Codecs.WithoutConversion() // [K8s 1.31兼容] K8s 1.33+ 使用 rest.CodecFactoryForGeneratedClient，1.31 用 scheme.Codecs
 
 	if config.UserAgent == "" {
 		config.UserAgent = rest.DefaultKubernetesUserAgent()

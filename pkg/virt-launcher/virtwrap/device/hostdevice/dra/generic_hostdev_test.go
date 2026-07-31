@@ -9,7 +9,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	k8sv1 "k8s.io/api/core/v1"
-	resourcev1 "k8s.io/api/resource/v1"
+	metadata "kubevirt.io/kubevirt/pkg/dra/metadata"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
@@ -76,7 +76,7 @@ var _ = Describe("CreateDRAHostDevices", func() {
 						Driver: "device.example.com",
 						Pool:   "device-pool",
 						Name:   "device1",
-						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+						Attributes: map[metadata.QualifiedName]metadata.DeviceAttribute{
 							metadata.PCIBusIDAttribute: {StringValue: &pci},
 						},
 					}},
@@ -131,7 +131,7 @@ var _ = Describe("CreateDRAHostDevices", func() {
 						Driver: "mdev.example.com",
 						Pool:   "mdev-pool",
 						Name:   "device1",
-						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+						Attributes: map[metadata.QualifiedName]metadata.DeviceAttribute{
 							metadata.MDevUUIDAttribute: {StringValue: &uuid},
 						},
 					}},
@@ -188,7 +188,7 @@ var _ = Describe("CreateDRAHostDevices", func() {
 						Driver: "mdev.example.com",
 						Pool:   "mdev-pool",
 						Name:   "device1",
-						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+						Attributes: map[metadata.QualifiedName]metadata.DeviceAttribute{
 							metadata.MDevUUIDAttribute: {StringValue: &uuid},
 						},
 					}},
@@ -246,7 +246,7 @@ var _ = Describe("CreateDRAHostDevices", func() {
 						Driver: "device.example.com",
 						Pool:   "device-pool",
 						Name:   "device1",
-						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+						Attributes: map[metadata.QualifiedName]metadata.DeviceAttribute{
 							metadata.PCIBusIDAttribute: {StringValue: &pci},
 						},
 					}},

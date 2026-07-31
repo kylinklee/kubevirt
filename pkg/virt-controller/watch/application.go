@@ -342,7 +342,7 @@ func Execute() {
 
 	if err := app.kubeVirtInformer.SetWatchErrorHandler(func(r *cache.Reflector, err error) {
 		apiHealthVersion.Clear()
-		cache.DefaultWatchErrorHandler(context.TODO(), r, err)
+		cache.DefaultWatchErrorHandler(r, err) // [K8s 1.31兼容] K8s 1.34签名含ctx参数，1.31不含，去掉context.TODO()
 	}); err != nil {
 		golog.Fatalf("failed to set the watch error handler: %v", err)
 	}

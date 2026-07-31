@@ -16,7 +16,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	k8sv1 "k8s.io/api/core/v1"
-	resourcev1 "k8s.io/api/resource/v1"
+	metadata "kubevirt.io/kubevirt/pkg/dra/metadata"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
@@ -88,7 +88,7 @@ var _ = Describe("CreateDRAGPUHostDevices", func() {
 						Driver: "gpu.example.com",
 						Pool:   "gpu-pool",
 						Name:   "device1",
-						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+						Attributes: map[metadata.QualifiedName]metadata.DeviceAttribute{
 							metadata.PCIBusIDAttribute: {StringValue: &pciAddr},
 						},
 					}},
@@ -151,7 +151,7 @@ var _ = Describe("CreateDRAGPUHostDevices", func() {
 						Driver: "gpu.example.com",
 						Pool:   "gpu-pool",
 						Name:   "device1",
-						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+						Attributes: map[metadata.QualifiedName]metadata.DeviceAttribute{
 							metadata.MDevUUIDAttribute: {StringValue: &uuid},
 						},
 					}},
@@ -215,7 +215,7 @@ var _ = Describe("CreateDRAGPUHostDevices", func() {
 						Driver: "gpu.example.com",
 						Pool:   "gpu-pool",
 						Name:   "vgpu-device",
-						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+						Attributes: map[metadata.QualifiedName]metadata.DeviceAttribute{
 							metadata.PCIBusIDAttribute: {StringValue: &pciAddr},
 							metadata.MDevUUIDAttribute: {StringValue: &mdevUUID},
 						},
@@ -280,7 +280,7 @@ var _ = Describe("CreateDRAGPUHostDevices", func() {
 						Driver: "gpu.example.com",
 						Pool:   "node01",
 						Name:   "gpu-0",
-						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+						Attributes: map[metadata.QualifiedName]metadata.DeviceAttribute{
 							metadata.PCIBusIDAttribute: {StringValue: &pciAddr},
 						},
 					}},
@@ -301,7 +301,7 @@ var _ = Describe("CreateDRAGPUHostDevices", func() {
 						Driver: "gpu.example.com",
 						Pool:   "node01",
 						Name:   "gpu-0-vgpu-0",
-						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+						Attributes: map[metadata.QualifiedName]metadata.DeviceAttribute{
 							metadata.PCIBusIDAttribute: {StringValue: &vgpuPCIAddr},
 							metadata.MDevUUIDAttribute: {StringValue: &mdevUUID},
 						},
@@ -383,7 +383,7 @@ var _ = Describe("CreateDRAGPUHostDevices", func() {
 						Driver: "gpu.example.com",
 						Pool:   "gpu-pool",
 						Name:   "device1",
-						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+						Attributes: map[metadata.QualifiedName]metadata.DeviceAttribute{
 							metadata.PCIBusIDAttribute: {StringValue: &pciAddr},
 						},
 					}},

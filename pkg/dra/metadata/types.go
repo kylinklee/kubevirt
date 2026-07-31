@@ -20,9 +20,27 @@
 package metadata
 
 import (
-	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+// [K8s 1.31兼容] 以下三个类型原本从 k8s.io/api/resource/v1 导入（K8s 1.33+ GA），
+// K8s 1.31 中 resource/v1 不存在（只有 v1alpha3），因此在本地重新定义，
+// 字段结构与上游 resource/v1 保持一致。
+
+// QualifiedName 是设备属性的限定名称（原 resource/v1 类型，K8s 1.31 不可用）
+type QualifiedName string
+
+// DeviceAttribute 表示单个设备属性（原 resource/v1 类型，K8s 1.31 不可用）
+type DeviceAttribute struct {
+	StringValue *string `json:"stringValue,omitempty"`
+	BoolValue   *bool   `json:"boolValue,omitempty"`
+	IntValue    *int64  `json:"intValue,omitempty"`
+}
+
+// NetworkDeviceData 包含网络设备元数据（原 resource/v1 类型，K8s 1.31 不可用）
+type NetworkDeviceData struct {
+	IPAddresses []string `json:"ipAddresses,omitempty"`
+}
 
 // DeviceMetadata contains metadata about devices allocated to a ResourceClaim.
 // It is serialized to versioned JSON files that can be mounted into containers.
@@ -44,18 +62,18 @@ type DeviceMetadataRequest struct {
 
 // Device contains metadata about a single allocated device.
 type Device struct {
-	Driver      string                                                  `json:"driver"`
-	Pool        string                                                  `json:"pool"`
-	Name        string                                                  `json:"name"`
-	Attributes  map[resourcev1.QualifiedName]resourcev1.DeviceAttribute `json:"attributes,omitempty"`
-	NetworkData *resourcev1.NetworkDeviceData                           `json:"networkData,omitempty"`
+	Driver      string                          `json:"driver"`
+	Pool        string                          `json:"pool"`
+	Name        string                          `json:"name"`
+	Attributes  map[QualifiedName]DeviceAttribute `json:"attributes,omitempty"`
+	NetworkData *NetworkDeviceData              `json:"networkData,omitempty"`
 }
 
 // Well-known attribute keys for device identification
 const (
 	// PCIBusIDAttribute is the standard attribute for PCI device address (passthrough GPUs)
-	PCIBusIDAttribute = resourcev1.QualifiedName("resource.kubernetes.io/pciBusID")
+	PCIBusIDAttribute = QualifiedName("resource.kubernetes.io/pciBusID")
 	// MDevUUIDAttribute is the attribute for mediated device UUID (vGPUs)
 	// Note: This is not yet standardized under resource.kubernetes.io
-	MDevUUIDAttribute = resourcev1.QualifiedName("mdevUUID")
+	MDevUUIDAttribute = QualifiedName("mdevUUID")
 )

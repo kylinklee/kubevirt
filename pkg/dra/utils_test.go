@@ -28,7 +28,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	k8sv1 "k8s.io/api/core/v1"
-	resourcev1 "k8s.io/api/resource/v1"
+	metadata "kubevirt.io/kubevirt/pkg/dra/metadata"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
@@ -72,7 +72,7 @@ var _ = Describe("DownwardAPIAttributes", func() {
 						Driver: "gpu.example.com",
 						Pool:   "default",
 						Name:   "gpu-0",
-						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+						Attributes: map[metadata.QualifiedName]metadata.DeviceAttribute{
 							metadata.PCIBusIDAttribute: {StringValue: &pciAddr},
 						},
 					}},
@@ -100,7 +100,7 @@ var _ = Describe("DownwardAPIAttributes", func() {
 						Driver: "gpu.example.com",
 						Pool:   "default",
 						Name:   "vgpu-0",
-						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+						Attributes: map[metadata.QualifiedName]metadata.DeviceAttribute{
 							metadata.MDevUUIDAttribute: {StringValue: &mdevUUID},
 						},
 					}},
@@ -137,7 +137,7 @@ var _ = Describe("DownwardAPIAttributes", func() {
 				Requests: []metadata.DeviceMetadataRequest{{
 					Name: "req1",
 					Devices: []metadata.Device{{
-						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+						Attributes: map[metadata.QualifiedName]metadata.DeviceAttribute{
 							metadata.PCIBusIDAttribute: {StringValue: &pciAddr},
 						},
 					}},
@@ -166,7 +166,7 @@ var _ = Describe("DownwardAPIAttributes", func() {
 				Requests: []metadata.DeviceMetadataRequest{{
 					Name: "other-req",
 					Devices: []metadata.Device{{
-						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{},
+						Attributes: map[metadata.QualifiedName]metadata.DeviceAttribute{},
 					}},
 				}},
 			})
@@ -186,7 +186,7 @@ var _ = Describe("DownwardAPIAttributes", func() {
 				ObjectMeta: metav1.ObjectMeta{Name: "claim1"},
 				Requests: []metadata.DeviceMetadataRequest{{
 					Name:    "req1",
-					Devices: []metadata.Device{{Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{}}},
+					Devices: []metadata.Device{{Attributes: map[metadata.QualifiedName]metadata.DeviceAttribute{}}},
 				}},
 			})
 
@@ -208,10 +208,10 @@ var _ = Describe("DownwardAPIAttributes", func() {
 				Requests: []metadata.DeviceMetadataRequest{{
 					Name: "req1",
 					Devices: []metadata.Device{
-						{Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+						{Attributes: map[metadata.QualifiedName]metadata.DeviceAttribute{
 							metadata.PCIBusIDAttribute: {StringValue: &pciAddr1},
 						}},
-						{Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+						{Attributes: map[metadata.QualifiedName]metadata.DeviceAttribute{
 							metadata.PCIBusIDAttribute: {StringValue: &pciAddr2},
 						}},
 					},
@@ -237,7 +237,7 @@ var _ = Describe("DownwardAPIAttributes", func() {
 				Requests: []metadata.DeviceMetadataRequest{{
 					Name: "vgpu-req",
 					Devices: []metadata.Device{{
-						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+						Attributes: map[metadata.QualifiedName]metadata.DeviceAttribute{
 							metadata.MDevUUIDAttribute: {StringValue: &uuid},
 						},
 					}},
@@ -267,7 +267,7 @@ var _ = Describe("DownwardAPIAttributes", func() {
 				Requests: []metadata.DeviceMetadataRequest{{
 					Name: "req1",
 					Devices: []metadata.Device{{
-						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+						Attributes: map[metadata.QualifiedName]metadata.DeviceAttribute{
 							metadata.PCIBusIDAttribute: {StringValue: &pciAddr},
 						},
 					}},
@@ -295,7 +295,7 @@ var _ = Describe("DownwardAPIAttributes", func() {
 				Requests: []metadata.DeviceMetadataRequest{{
 					Name: "gpu-req",
 					Devices: []metadata.Device{{
-						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+						Attributes: map[metadata.QualifiedName]metadata.DeviceAttribute{
 							metadata.PCIBusIDAttribute: {StringValue: &pciAddr},
 						},
 					}},
@@ -307,7 +307,7 @@ var _ = Describe("DownwardAPIAttributes", func() {
 				Requests: []metadata.DeviceMetadataRequest{{
 					Name: "vgpu-req",
 					Devices: []metadata.Device{{
-						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+						Attributes: map[metadata.QualifiedName]metadata.DeviceAttribute{
 							metadata.MDevUUIDAttribute: {StringValue: &mdevUUID},
 						},
 					}},
@@ -338,7 +338,7 @@ var _ = Describe("DownwardAPIAttributes", func() {
 				Requests: []metadata.DeviceMetadataRequest{{
 					Name: "pci-req",
 					Devices: []metadata.Device{{
-						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+						Attributes: map[metadata.QualifiedName]metadata.DeviceAttribute{
 							metadata.PCIBusIDAttribute: {StringValue: &pciAddr},
 						},
 					}},
@@ -363,7 +363,7 @@ var _ = Describe("DownwardAPIAttributes", func() {
 				Requests: []metadata.DeviceMetadataRequest{{
 					Name: "vgpu-req",
 					Devices: []metadata.Device{{
-						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+						Attributes: map[metadata.QualifiedName]metadata.DeviceAttribute{
 							metadata.MDevUUIDAttribute: {StringValue: &mdevUUID},
 						},
 					}},
@@ -389,7 +389,7 @@ var _ = Describe("DownwardAPIAttributes", func() {
 				Requests: []metadata.DeviceMetadataRequest{{
 					Name: "pci-req",
 					Devices: []metadata.Device{{
-						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+						Attributes: map[metadata.QualifiedName]metadata.DeviceAttribute{
 							metadata.PCIBusIDAttribute: {StringValue: &pciAddr},
 						},
 					}},
@@ -402,7 +402,7 @@ var _ = Describe("DownwardAPIAttributes", func() {
 				Requests: []metadata.DeviceMetadataRequest{{
 					Name: "vgpu-req",
 					Devices: []metadata.Device{{
-						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+						Attributes: map[metadata.QualifiedName]metadata.DeviceAttribute{
 							metadata.MDevUUIDAttribute: {StringValue: &mdevUUID},
 						},
 					}},
@@ -442,7 +442,7 @@ var _ = Describe("DownwardAPIAttributes", func() {
 				Requests: []metadata.DeviceMetadataRequest{{
 					Name: "actual-req",
 					Devices: []metadata.Device{{
-						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{},
+						Attributes: map[metadata.QualifiedName]metadata.DeviceAttribute{},
 					}},
 				}},
 			})
