@@ -209,6 +209,12 @@ type KubeInformerFactory interface {
 	// Fake CDI DataSource informer used when feature gate is disabled
 	DummyDataSource() cache.SharedIndexInformer
 
+	// [升级兼容] Fake VirtualMachineRestore informer used when snapshot CRD does not exist
+	DummyVirtualMachineRestore() cache.SharedIndexInformer
+
+	// [升级兼容] Fake VirtualMachineBackup informer used when backup CRD does not exist
+	DummyVirtualMachineBackup() cache.SharedIndexInformer
+
 	// Watches for CDI StorageProfile objects
 	StorageProfile() cache.SharedIndexInformer
 
@@ -994,6 +1000,22 @@ func (f *kubeInformerFactory) DataSource() cache.SharedIndexInformer {
 func (f *kubeInformerFactory) DummyDataSource() cache.SharedIndexInformer {
 	return f.getInformer("fakeDataSourceInformer", func() cache.SharedIndexInformer {
 		informer, _ := testutils.NewFakeInformerFor(&cdiv1.DataSource{})
+		return informer
+	})
+}
+
+// [升级兼容] 当 snapshot CRD 不存在时使用的 dummy informer
+func (f *kubeInformerFactory) DummyVirtualMachineRestore() cache.SharedIndexInformer {
+	return f.getInformer("fakeVirtualMachineRestoreInformer", func() cache.SharedIndexInformer {
+		informer, _ := testutils.NewFakeInformerFor(&snapshotv1.VirtualMachineRestore{})
+		return informer
+	})
+}
+
+// [升级兼容] 当 backup CRD 不存在时使用的 dummy informer
+func (f *kubeInformerFactory) DummyVirtualMachineBackup() cache.SharedIndexInformer {
+	return f.getInformer("fakeVirtualMachineBackupInformer", func() cache.SharedIndexInformer {
+		informer, _ := testutils.NewFakeInformerFor(&backupv1.VirtualMachineBackup{})
 		return informer
 	})
 }

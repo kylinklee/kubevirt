@@ -1197,8 +1197,6 @@ func (app *virtAPIApp) Run() {
 	kubeInformerFactory.KubeVirtCAConfigMap()
 	crdInformer := kubeInformerFactory.CRD()
 	vmiPresetInformer := kubeInformerFactory.VirtualMachinePreset()
-	vmRestoreInformer := kubeInformerFactory.VirtualMachineRestore()
-	vmBackupInformer := kubeInformerFactory.VirtualMachineBackup()
 	namespaceInformer := kubeInformerFactory.Namespace()
 
 	stopChan := make(chan struct{}, 1)
@@ -1225,6 +1223,27 @@ func (app *virtAPIApp) Run() {
 		// requiring a separate branching code path.
 		dataSourceInformer = kubeInformerFactory.DummyDataSource()
 		log.Log.Infof("CDI not detected, DataSource integration disabled")
+	}
+
+	// [升级兼容] snapshot CRD 在 v1.2.0→v1.6.6 升级过程中可能不存在
+	// 使用条件创建避免 informer 因 CRD 缺失导致启动失败
+	var vmRestoreInformer cache.SharedIndexInformer
+	if app.clusterConfig.HasSnapshotAPI() {
+		vmRestoreInformer = kubeInformerFactory.VirtualMachineRestore()
+		log.Log.Infof("Snapshot API detected, VirtualMachineRestore informer enabled")
+	} else {
+		vmRestoreInformer = kubeInformerFactory.DummyVirtualMachineRestore()
+		log.Log.Infof("Snapshot API not detected, using dummy VirtualMachineRestore informer")
+	}
+
+	// [升级兼容] backup CRD 在 v1.2.0→v1.6.6 升级过程中可能不存在
+	var vmBackupInformer cache.SharedIndexInformer
+	if app.clusterConfig.HasBackupAPI() {
+		vmBackupInformer = kubeInformerFactory.VirtualMachineBackup()
+		log.Log.Infof("Backup API detected, VirtualMachineBackup informer enabled")
+	} else {
+		vmBackupInformer = kubeInformerFactory.DummyVirtualMachineBackup()
+		log.Log.Infof("Backup API not detected, using dummy VirtualMachineBackup informer")
 	}
 
 	// It is safe to call kubeInformerFactory.Start multiple times.

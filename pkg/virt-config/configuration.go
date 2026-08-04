@@ -136,6 +136,16 @@ func isPrometheusRules(crd *extv1.CustomResourceDefinition) bool {
 	return crd.Spec.Names.Kind == "PrometheusRule" && crd.Spec.Group == MonitoringGroupName
 }
 
+// [升级兼容] 判断 CRD 是否属于 snapshot.kubevirt.io 组
+func isSnapshotCrd(crd *extv1.CustomResourceDefinition) bool {
+	return crd.Spec.Group == "snapshot.kubevirt.io"
+}
+
+// [升级兼容] 判断 CRD 是否属于 backup.kubevirt.io 组
+func isBackupCrd(crd *extv1.CustomResourceDefinition) bool {
+	return crd.Spec.Group == "backup.kubevirt.io"
+}
+
 func (c *ClusterConfig) crdAddedDeleted(obj interface{}) {
 	go c.GetConfig()
 	crd := obj.(*extv1.CustomResourceDefinition)
@@ -390,6 +400,40 @@ func (c *ClusterConfig) HasDataSourceAPI() bool {
 	for _, obj := range objects {
 		if crd, ok := obj.(*extv1.CustomResourceDefinition); ok && crd.DeletionTimestamp == nil {
 			if isDataSourceCrd(crd) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// [升级兼容] 检查 snapshot.kubevirt.io CRD 是否存在
+// 升级过程中 snapshot CRD 可能尚未创建，virt-api 需要据此决定是否创建相关 informer
+func (c *ClusterConfig) HasSnapshotAPI() bool {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	objects := c.crdStore.List()
+	for _, obj := range objects {
+		if crd, ok := obj.(*extv1.CustomResourceDefinition); ok && crd.DeletionTimestamp == nil {
+			if isSnapshotCrd(crd) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// [升级兼容] 检查 backup.kubevirt.io CRD 是否存在
+// 升级过程中 backup CRD 可能尚未创建，virt-api 需要据此决定是否创建相关 informer
+func (c *ClusterConfig) HasBackupAPI() bool {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	objects := c.crdStore.List()
+	for _, obj := range objects {
+		if crd, ok := obj.(*extv1.CustomResourceDefinition); ok && crd.DeletionTimestamp == nil {
+			if isBackupCrd(crd) {
 				return true
 			}
 		}
