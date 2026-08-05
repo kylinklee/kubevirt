@@ -185,12 +185,37 @@ func (app *exportProxyApp) prepareInformers(stopChan <-chan struct{}) {
 
 	kubeInformerFactory := controller.NewKubeInformerFactory(virtCli.RestClient(), virtCli, aggregatorClient, namespace)
 	caInformer := kubeInformerFactory.KubeVirtExportCAConfigMap()
-	app.exportStore = kubeInformerFactory.VirtualMachineExport().GetStore()
 	app.kubeVirtStore = kubeInformerFactory.KubeVirt().GetStore()
+
+	// [升级兼容] v1.2.0→v1.6.6 跳版本升级过程中，export CRD 可能尚未升级到
+	// v1beta1（旧集群只有 v1alpha1），此时 v1beta1 informer 的 List/Watch
+	// 会 404 导致 cache 无法同步、virt-exportproxy 启动阻塞。使用 dummy
+	// informer 规避，等 CRD 升级完成、virt-exportproxy 重启后自动恢复。
+	if app.hasExportV1beta1(virtCli) {
+		app.exportStore = kubeInformerFactory.VirtualMachineExport().GetStore()
+	} else {
+		app.exportStore = kubeInformerFactory.DummyVirtualMachineExport().GetStore()
+		log.Log.Infof("Export v1beta1 API not detected, using dummy VirtualMachineExport store")
+	}
+
 	kubeInformerFactory.Start(stopChan)
 	kubeInformerFactory.WaitForCacheSync(stopChan)
 
 	app.caManager = kvtls.NewCAManager(caInformer.GetStore(), namespace, "kubevirt-export-ca")
+}
+
+// [升级兼容] 通过 discovery 检查 export.kubevirt.io CRD 是否 serve v1beta1
+func (app *exportProxyApp) hasExportV1beta1(virtCli kubecli.KubevirtClient) bool {
+	resourceLists, err := virtCli.DiscoveryClient().ServerResourcesForGroupVersion("export.kubevirt.io/v1beta1")
+	if err != nil {
+		return false
+	}
+	for _, resource := range resourceLists.APIResources {
+		if resource.Name == "virtualmachineexports" {
+			return true
+		}
+	}
+	return false
 }
 
 func (app *exportProxyApp) prepareCertManager() {

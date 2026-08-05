@@ -31,7 +31,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/tools/cache"
 
+	clonev1 "kubevirt.io/api/clone/v1beta1"
 	v1 "kubevirt.io/api/core/v1"
+	exportv1 "kubevirt.io/api/export/v1beta1"
+	snapshotv1 "kubevirt.io/api/snapshot/v1beta1"
 	"kubevirt.io/client-go/log"
 
 	"kubevirt.io/kubevirt/pkg/pointer"
@@ -134,11 +137,42 @@ func isPrometheusRules(crd *extv1.CustomResourceDefinition) bool {
 	return crd.Spec.Names.Kind == "PrometheusRule"
 }
 
+// [升级兼容] 判断 CRD 是否属于 snapshot.kubevirt.io 组
+func isSnapshotCrd(crd *extv1.CustomResourceDefinition) bool {
+	return crd.Spec.Group == "snapshot.kubevirt.io"
+}
+
+// [升级兼容] 判断 CRD 是否属于 export.kubevirt.io 组
+func isExportCrd(crd *extv1.CustomResourceDefinition) bool {
+	return crd.Spec.Group == "export.kubevirt.io"
+}
+
+// [升级兼容] 判断 CRD 是否属于 clone.kubevirt.io 组
+func isCloneCrd(crd *extv1.CustomResourceDefinition) bool {
+	return crd.Spec.Group == "clone.kubevirt.io"
+}
+
+// [升级兼容] 判断 CRD 是否 served 指定版本
+// v1.2.0 集群中 snapshot/export/clone CRD 只 serve v1alpha1，
+// 而 v1.6.6 的 informer 使用 v1beta1 REST client。跳版本升级时
+// 必须确认 CRD 已 serve v1beta1 才能安全创建对应 informer。
+func crdServesVersion(crd *extv1.CustomResourceDefinition, version string) bool {
+	for _, v := range crd.Spec.Versions {
+		if v.Name == version && v.Served {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *ClusterConfig) crdAddedDeleted(obj interface{}) {
 	go c.GetConfig()
 	crd := obj.(*extv1.CustomResourceDefinition)
 	if !isDataVolumeCrd(crd) && !isDataSourceCrd(crd) &&
-		!isServiceMonitor(crd) && !isPrometheusRules(crd) {
+		!isServiceMonitor(crd) && !isPrometheusRules(crd) &&
+		// [升级兼容] 跳版本升级时 snapshot/export/clone CRD 的出现/消失
+		// 需要触发 virt-controller/virt-api 重新初始化以切换真实 informer
+		!isSnapshotCrd(crd) && !isExportCrd(crd) && !isCloneCrd(crd) {
 		return
 	}
 
@@ -383,6 +417,57 @@ func (c *ClusterConfig) HasDataSourceAPI() bool {
 	for _, obj := range objects {
 		if crd, ok := obj.(*extv1.CustomResourceDefinition); ok && crd.DeletionTimestamp == nil {
 			if isDataSourceCrd(crd) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// [升级兼容] 检查 snapshot.kubevirt.io CRD 是否存在且 serve v1beta1
+// 升级过程中 snapshot CRD 可能只有 v1alpha1（v1.2.0 集群），
+// v1.6.6 的 informer 需要 v1beta1，virt-api/virt-controller 据此决定
+// 是否创建真实 informer
+func (c *ClusterConfig) HasSnapshotAPI() bool {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	objects := c.crdStore.List()
+	for _, obj := range objects {
+		if crd, ok := obj.(*extv1.CustomResourceDefinition); ok && crd.DeletionTimestamp == nil {
+			if isSnapshotCrd(crd) && crdServesVersion(crd, snapshotv1.SchemeGroupVersion.Version) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// [升级兼容] 检查 export.kubevirt.io CRD 是否存在且 serve v1beta1
+func (c *ClusterConfig) HasExportAPI() bool {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	objects := c.crdStore.List()
+	for _, obj := range objects {
+		if crd, ok := obj.(*extv1.CustomResourceDefinition); ok && crd.DeletionTimestamp == nil {
+			if isExportCrd(crd) && crdServesVersion(crd, exportv1.SchemeGroupVersion.Version) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// [升级兼容] 检查 clone.kubevirt.io CRD 是否存在且 serve v1beta1
+func (c *ClusterConfig) HasCloneAPI() bool {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	objects := c.crdStore.List()
+	for _, obj := range objects {
+		if crd, ok := obj.(*extv1.CustomResourceDefinition); ok && crd.DeletionTimestamp == nil {
+			if isCloneCrd(crd) && crdServesVersion(crd, clonev1.SchemeGroupVersion.Version) {
 				return true
 			}
 		}

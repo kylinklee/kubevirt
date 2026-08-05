@@ -199,6 +199,21 @@ type KubeInformerFactory interface {
 	// Fake CDI DataSource informer used when feature gate is disabled
 	DummyDataSource() cache.SharedIndexInformer
 
+	// [升级兼容] Fake VirtualMachineRestore informer used when snapshot CRD does not exist
+	DummyVirtualMachineRestore() cache.SharedIndexInformer
+
+	// [升级兼容] Fake VirtualMachineSnapshot informer used when snapshot CRD does not exist
+	DummyVirtualMachineSnapshot() cache.SharedIndexInformer
+
+	// [升级兼容] Fake VirtualMachineSnapshotContent informer used when snapshot CRD does not exist
+	DummyVirtualMachineSnapshotContent() cache.SharedIndexInformer
+
+	// [升级兼容] Fake VirtualMachineExport informer used when export CRD does not exist
+	DummyVirtualMachineExport() cache.SharedIndexInformer
+
+	// [升级兼容] Fake VirtualMachineClone informer used when clone CRD does not exist
+	DummyVirtualMachineClone() cache.SharedIndexInformer
+
 	// Watches for CDI StorageProfile objects
 	StorageProfile() cache.SharedIndexInformer
 
@@ -678,6 +693,14 @@ func (f *kubeInformerFactory) VirtualMachineExport() cache.SharedIndexInformer {
 	})
 }
 
+// [升级兼容] 当 export CRD 不存在时使用的 dummy informer
+func (f *kubeInformerFactory) DummyVirtualMachineExport() cache.SharedIndexInformer {
+	return f.getInformer("fakeVirtualMachineExportInformer", func() cache.SharedIndexInformer {
+		informer, _ := testutils.NewFakeInformerFor(&exportv1.VirtualMachineExport{})
+		return informer
+	})
+}
+
 func GetVirtualMachineSnapshotInformerIndexers() cache.Indexers {
 	return cache.Indexers{
 		"vm": func(obj interface{}) ([]string, error) {
@@ -701,6 +724,14 @@ func (f *kubeInformerFactory) VirtualMachineSnapshot() cache.SharedIndexInformer
 	return f.getInformer("vmSnapshotInformer", func() cache.SharedIndexInformer {
 		lw := cache.NewListWatchFromClient(f.clientSet.GeneratedKubeVirtClient().SnapshotV1beta1().RESTClient(), "virtualmachinesnapshots", k8sv1.NamespaceAll, fields.Everything())
 		return cache.NewSharedIndexInformer(lw, &snapshotv1.VirtualMachineSnapshot{}, f.defaultResync, GetVirtualMachineSnapshotInformerIndexers())
+	})
+}
+
+// [升级兼容] 当 snapshot CRD 不存在时使用的 dummy informer
+func (f *kubeInformerFactory) DummyVirtualMachineSnapshot() cache.SharedIndexInformer {
+	return f.getInformer("fakeVirtualMachineSnapshotInformer", func() cache.SharedIndexInformer {
+		informer, _ := testutils.NewFakeInformerFor(&snapshotv1.VirtualMachineSnapshot{})
+		return informer
 	})
 }
 
@@ -730,6 +761,14 @@ func (f *kubeInformerFactory) VirtualMachineSnapshotContent() cache.SharedIndexI
 	})
 }
 
+// [升级兼容] 当 snapshot CRD 不存在时使用的 dummy informer
+func (f *kubeInformerFactory) DummyVirtualMachineSnapshotContent() cache.SharedIndexInformer {
+	return f.getInformer("fakeVirtualMachineSnapshotContentInformer", func() cache.SharedIndexInformer {
+		informer, _ := testutils.NewFakeInformerFor(&snapshotv1.VirtualMachineSnapshotContent{})
+		return informer
+	})
+}
+
 func GetVirtualMachineRestoreInformerIndexers() cache.Indexers {
 	return cache.Indexers{
 		cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
@@ -754,6 +793,14 @@ func (f *kubeInformerFactory) VirtualMachineRestore() cache.SharedIndexInformer 
 	return f.getInformer("vmRestoreInformer", func() cache.SharedIndexInformer {
 		lw := cache.NewListWatchFromClient(f.clientSet.GeneratedKubeVirtClient().SnapshotV1beta1().RESTClient(), "virtualmachinerestores", k8sv1.NamespaceAll, fields.Everything())
 		return cache.NewSharedIndexInformer(lw, &snapshotv1.VirtualMachineRestore{}, f.defaultResync, GetVirtualMachineRestoreInformerIndexers())
+	})
+}
+
+// [升级兼容] 当 snapshot CRD 不存在时使用的 dummy informer
+func (f *kubeInformerFactory) DummyVirtualMachineRestore() cache.SharedIndexInformer {
+	return f.getInformer("fakeVirtualMachineRestoreInformer", func() cache.SharedIndexInformer {
+		informer, _ := testutils.NewFakeInformerFor(&snapshotv1.VirtualMachineRestore{})
+		return informer
 	})
 }
 
@@ -858,6 +905,14 @@ func (f *kubeInformerFactory) VirtualMachineClone() cache.SharedIndexInformer {
 	return f.getInformer("virtualMachineCloneInformer", func() cache.SharedIndexInformer {
 		lw := cache.NewListWatchFromClient(f.clientSet.GeneratedKubeVirtClient().CloneV1beta1().RESTClient(), clonebase.ResourceVMClonePlural, k8sv1.NamespaceAll, fields.Everything())
 		return cache.NewSharedIndexInformer(lw, &clone.VirtualMachineClone{}, f.defaultResync, GetVirtualMachineCloneInformerIndexers())
+	})
+}
+
+// [升级兼容] 当 clone CRD 不存在时使用的 dummy informer
+func (f *kubeInformerFactory) DummyVirtualMachineClone() cache.SharedIndexInformer {
+	return f.getInformer("fakeVirtualMachineCloneInformer", func() cache.SharedIndexInformer {
+		informer, _ := testutils.NewFakeInformerFor(&clone.VirtualMachineClone{})
+		return informer
 	})
 }
 

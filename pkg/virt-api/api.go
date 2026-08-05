@@ -138,6 +138,8 @@ type virtAPIApp struct {
 
 	// indicates if controllers were started with or without CDI/DataSource support
 	hasCDIDataSource bool
+	// [升级兼容] indicates if snapshot v1beta1 API is available (jump upgrade compat)
+	hasSnapshotAPI bool
 	// the channel used to trigger re-initialization.
 	reInitChan chan string
 
@@ -1120,7 +1122,6 @@ func (app *virtAPIApp) Run() {
 	kubeInformerFactory.KubeVirtCAConfigMap()
 	crdInformer := kubeInformerFactory.CRD()
 	vmiPresetInformer := kubeInformerFactory.VirtualMachinePreset()
-	vmRestoreInformer := kubeInformerFactory.VirtualMachineRestore()
 	namespaceInformer := kubeInformerFactory.Namespace()
 
 	stopChan := make(chan struct{}, 1)
@@ -1133,6 +1134,7 @@ func (app *virtAPIApp) Run() {
 		panic(err)
 	}
 	app.hasCDIDataSource = app.clusterConfig.HasDataSourceAPI()
+	app.hasSnapshotAPI = app.clusterConfig.HasSnapshotAPI()
 	app.clusterConfig.SetConfigModifiedCallback(app.configModificationCallback)
 	app.clusterConfig.SetConfigModifiedCallback(app.shouldChangeLogVerbosity)
 	app.clusterConfig.SetConfigModifiedCallback(app.shouldChangeRateLimiter)
@@ -1147,6 +1149,18 @@ func (app *virtAPIApp) Run() {
 		// requiring a separate branching code path.
 		dataSourceInformer = kubeInformerFactory.DummyDataSource()
 		log.Log.Infof("CDI not detected, DataSource integration disabled")
+	}
+
+	// [升级兼容] snapshot CRD 在 v1.2.0→v1.6.6 升级过程中可能尚未升级到
+	// v1beta1（旧集群只有 v1alpha1），此时 informer 的 v1beta1 List/Watch
+	// 会 404 导致 cache 无法同步、virt-api 无法启动。使用条件创建避免。
+	var vmRestoreInformer cache.SharedIndexInformer
+	if app.clusterConfig.HasSnapshotAPI() {
+		vmRestoreInformer = kubeInformerFactory.VirtualMachineRestore()
+		log.Log.Infof("Snapshot API detected, VirtualMachineRestore informer enabled")
+	} else {
+		vmRestoreInformer = kubeInformerFactory.DummyVirtualMachineRestore()
+		log.Log.Infof("Snapshot API not detected, using dummy VirtualMachineRestore informer")
 	}
 
 	// It is safe to call kubeInformerFactory.Start multiple times.
@@ -1189,6 +1203,20 @@ func (app *virtAPIApp) configModificationCallback() {
 			log.Log.Infof("Reinitialize virt-api, cdi DataSource api has been removed")
 		}
 		app.reInitChan <- "reinit due to CDI api change"
+		return
+	}
+
+	// [升级兼容] 跳版本升级过程中 snapshot CRD 可能中途升级到 v1beta1，
+	// 此时需要重新初始化 virt-api，从 dummy informer 切换到真实 informer
+	newHasSnapshotAPI := app.clusterConfig.HasSnapshotAPI()
+	if newHasSnapshotAPI != app.hasSnapshotAPI {
+		if newHasSnapshotAPI {
+			log.Log.Infof("Reinitialize virt-api, snapshot API has been introduced")
+		} else {
+			log.Log.Infof("Reinitialize virt-api, snapshot API has been removed")
+		}
+		app.reInitChan <- "reinit due to snapshot API change"
+		return
 	}
 }
 

@@ -245,6 +245,10 @@ type VirtControllerApp struct {
 	hasCDI bool
 	// indicates if controllers were started with or without DRA support
 	isDRAEnabled bool
+	// [升级兼容] indicates if controllers were started with or without snapshot/export/clone CRDs
+	hasSnapshotAPI bool
+	hasExportAPI   bool
+	hasCloneAPI    bool
 	// the channel used to trigger re-initialization.
 	reInitChan chan string
 
@@ -397,10 +401,31 @@ func Execute() {
 
 	app.controllerRevisionInformer = app.informerFactory.ControllerRevision()
 
-	app.vmExportInformer = app.informerFactory.VirtualMachineExport()
-	app.vmSnapshotInformer = app.informerFactory.VirtualMachineSnapshot()
-	app.vmSnapshotContentInformer = app.informerFactory.VirtualMachineSnapshotContent()
-	app.vmRestoreInformer = app.informerFactory.VirtualMachineRestore()
+	// [升级兼容] v1.2.0→v1.6.6 跳版本升级过程中，snapshot/export/clone CRD
+	// 可能尚未升级到 v1beta1（旧集群只有 v1alpha1），此时 informer 的
+	// v1beta1 List/Watch 会 404 导致 cache 无法同步、virt-controller 启动阻塞。
+	// 与 virt-api 的做法一致：CRD 不存在时使用 dummy informer，等升级完成
+	// 后通过 reinit 机制自动切换到真实 informer。
+	app.hasSnapshotAPI = app.clusterConfig.HasSnapshotAPI()
+	app.hasExportAPI = app.clusterConfig.HasExportAPI()
+	app.hasCloneAPI = app.clusterConfig.HasCloneAPI()
+
+	if app.hasExportAPI {
+		app.vmExportInformer = app.informerFactory.VirtualMachineExport()
+	} else {
+		app.vmExportInformer = app.informerFactory.DummyVirtualMachineExport()
+		log.Log.Infof("Export API not detected, using dummy VirtualMachineExport informer")
+	}
+	if app.hasSnapshotAPI {
+		app.vmSnapshotInformer = app.informerFactory.VirtualMachineSnapshot()
+		app.vmSnapshotContentInformer = app.informerFactory.VirtualMachineSnapshotContent()
+		app.vmRestoreInformer = app.informerFactory.VirtualMachineRestore()
+	} else {
+		app.vmSnapshotInformer = app.informerFactory.DummyVirtualMachineSnapshot()
+		app.vmSnapshotContentInformer = app.informerFactory.DummyVirtualMachineSnapshotContent()
+		app.vmRestoreInformer = app.informerFactory.DummyVirtualMachineRestore()
+		log.Log.Infof("Snapshot API not detected, using dummy snapshot/restore informers")
+	}
 	app.storageClassInformer = app.informerFactory.StorageClass()
 	app.caExportConfigMapInformer = app.informerFactory.KubeVirtExportCAConfigMap()
 	app.exportRouteConfigMapInformer = app.informerFactory.ExportRouteConfigMap()
@@ -442,7 +467,12 @@ func Execute() {
 	app.ingressCache = app.informerFactory.Ingress().GetStore()
 	app.migrationPolicyInformer = app.informerFactory.MigrationPolicy()
 
-	app.vmCloneInformer = app.informerFactory.VirtualMachineClone()
+	if app.hasCloneAPI {
+		app.vmCloneInformer = app.informerFactory.VirtualMachineClone()
+	} else {
+		app.vmCloneInformer = app.informerFactory.DummyVirtualMachineClone()
+		log.Log.Infof("Clone API not detected, using dummy VirtualMachineClone informer")
+	}
 
 	app.instancetypeInformer = app.informerFactory.VirtualMachineInstancetype()
 	app.clusterInstancetypeInformer = app.informerFactory.VirtualMachineClusterInstancetype()
@@ -513,6 +543,18 @@ func (vca *VirtControllerApp) configModificationCallback() {
 		} else {
 			log.Log.Infof("Reinitialize virt-controller, DRA integration has been removed")
 		}
+		vca.reInitChan <- "reinit"
+		return
+	}
+
+	// [升级兼容] 跳版本升级过程中 snapshot/export/clone CRD 可能中途出现，
+	// 此时需要重新初始化 virt-controller，从 dummy informer 切换到真实 informer
+	newHasSnapshotAPI := vca.clusterConfig.HasSnapshotAPI()
+	newHasExportAPI := vca.clusterConfig.HasExportAPI()
+	newHasCloneAPI := vca.clusterConfig.HasCloneAPI()
+	if newHasSnapshotAPI != vca.hasSnapshotAPI || newHasExportAPI != vca.hasExportAPI || newHasCloneAPI != vca.hasCloneAPI {
+		log.Log.Infof("Reinitialize virt-controller, snapshot/export/clone CRD availability changed (snapshot:%t export:%t clone:%t)",
+			newHasSnapshotAPI, newHasExportAPI, newHasCloneAPI)
 		vca.reInitChan <- "reinit"
 		return
 	}
