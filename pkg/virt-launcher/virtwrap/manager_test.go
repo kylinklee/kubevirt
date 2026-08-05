@@ -76,6 +76,11 @@ var (
 	testDumpPath         = "/test/dump/path/vol1.memory.dump"
 	clusterConfig        *virtconfig.ClusterConfig
 
+	// [升级兼容] graceful shutdown 测试用 domain XML：
+	// domainHasACPI 依据 active XML 中的 ACPI feature 选择关机信号
+	domainXMLWithACPI    = `<domain type="kvm"><features><acpi/></features></domain>`
+	domainXMLWithoutACPI = `<domain type="kvm"><features></features></domain>`
+
 	//go:embed testdata/migration_domain.xml
 	embedMigrationDomain string
 
@@ -1836,6 +1841,26 @@ var _ = Describe("Manager", func() {
 		It("Should signal graceful shutdown after marked for shutdown", func() {
 			mockLibvirt.DomainEXPECT().GetState().AnyTimes().Return(libvirt.DOMAIN_RUNNING, 1, nil)
 			mockLibvirt.ConnectionEXPECT().LookupDomainByName(testDomainName).AnyTimes().DoAndReturn(mockDomainWithFreeExpectation)
+			// [升级兼容] domainHasACPI 读取 active XML 判断 ACPI feature；
+			// domain 启用 ACPI 时使用 ACPI 电源键（恢复 v1.2.0 行为，
+			// 避免 DEFAULT 信号走 guest agent 路径导致优雅关机失败）
+			mockLibvirt.DomainEXPECT().GetXMLDesc(0).Return(domainXMLWithACPI, nil)
+			mockLibvirt.DomainEXPECT().ShutdownFlags(libvirt.DOMAIN_SHUTDOWN_ACPI_POWER_BTN).Return(nil)
+
+			manager, _ := newLibvirtDomainManagerDefault()
+
+			vmi := newVMI(testNamespace, testVmName)
+			manager.SignalShutdownVMI(vmi)
+
+			gracePeriod, _ := metadataCache.GracePeriod.Load()
+			Expect(gracePeriod.DeletionTimestamp).NotTo(BeNil())
+		})
+
+		It("Should signal graceful shutdown with default flag when domain has no ACPI", func() {
+			mockLibvirt.DomainEXPECT().GetState().AnyTimes().Return(libvirt.DOMAIN_RUNNING, 1, nil)
+			mockLibvirt.ConnectionEXPECT().LookupDomainByName(testDomainName).AnyTimes().DoAndReturn(mockDomainWithFreeExpectation)
+			// 无 ACPI 的 domain（如 s390x）保留 DEFAULT 信号，维持 v1.5.0 的 s390x 修复
+			mockLibvirt.DomainEXPECT().GetXMLDesc(0).Return(domainXMLWithoutACPI, nil)
 			mockLibvirt.DomainEXPECT().ShutdownFlags(libvirt.DOMAIN_SHUTDOWN_DEFAULT).Return(nil)
 
 			manager, _ := newLibvirtDomainManagerDefault()

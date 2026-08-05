@@ -2110,7 +2110,17 @@ func (l *LibvirtDomainManager) SignalShutdownVMI(vmi *v1.VirtualMachineInstance)
 	}
 
 	if domState == libvirt.DOMAIN_RUNNING || domState == libvirt.DOMAIN_PAUSED {
-		err = dom.ShutdownFlags(libvirt.DOMAIN_SHUTDOWN_DEFAULT)
+		// [升级兼容] v1.5.0 起（commit d555b25e26）改用 DOMAIN_SHUTDOWN_DEFAULT 信号，
+		// 该信号会让 libvirt 优先通过 QEMU guest agent 发起关机；当 guest 内未运行
+		// qemu-ga 时 agent 关机无效，优雅关机将超时并 destroy domain，
+		// 导致 VMI 以 Failed 结束，触发 runStrategy=RerunOnFailure 的自动重启。
+		// 恢复 v1.2.0 行为：domain 实际启用 ACPI 时显式发送 ACPI 电源键；
+		// 无 ACPI 的架构（如 s390x）保留 DEFAULT 以维持原修复（s390x 优雅关机）。
+		shutdownFlag := libvirt.DOMAIN_SHUTDOWN_DEFAULT
+		if domainHasACPI(dom) {
+			shutdownFlag = libvirt.DOMAIN_SHUTDOWN_ACPI_POWER_BTN
+		}
+		err = dom.ShutdownFlags(shutdownFlag)
 		if err != nil {
 			log.Log.Object(vmi).Reason(err).Error("Signalling graceful shutdown failed.")
 			return err
@@ -2127,6 +2137,24 @@ func (l *LibvirtDomainManager) SignalShutdownVMI(vmi *v1.VirtualMachineInstance)
 	}
 
 	return nil
+}
+
+// domainHasACPI 通过 libvirt active XML 判断 domain 是否实际启用了 ACPI feature。
+// 不直接依赖 VMI spec：VMI 未显式设置 features 时，QEMU（x86_64/aarch64）
+// 默认仍启用 ACPI，仅看 VMI spec 会漏判，导致优雅关机误用 DEFAULT 信号
+// 走 guest agent 路径而失败。
+func domainHasACPI(dom cli.VirDomain) bool {
+	xmlDesc, err := dom.GetXMLDesc(0)
+	if err != nil {
+		log.Log.Reason(err).Warning("Failed to get domain XML to detect ACPI feature, assuming ACPI disabled")
+		return false
+	}
+	var domainSpec api.DomainSpec
+	if err := xml.Unmarshal([]byte(xmlDesc), &domainSpec); err != nil {
+		log.Log.Reason(err).Warning("Failed to parse domain XML to detect ACPI feature, assuming ACPI disabled")
+		return false
+	}
+	return domainSpec.Features != nil && domainSpec.Features.ACPI != nil
 }
 
 func (l *LibvirtDomainManager) KillVMI(vmi *v1.VirtualMachineInstance) error {
