@@ -1,0 +1,81 @@
+@startuml
+' ============================================================
+' virt-handler worker 工作机制对比（v1.2.0 vs v1.6.6）
+' 背景：升级项目排查 "Stop 后 VMI 自动拉起" 问题
+' 机制核心：client-go workqueue 单 key 互斥
+' 代码位置均标注两版本的文件:行号
+' ============================================================
+title virt-handler worker 工作机制（v1.2.0 vs v1.6.6）
+hide empty description
+skinparam activityDiamondBackgroundColor #FFF3CD
+skinparam activityBackgroundColor #EEF4FB
+skinparam noteBackgroundColor #FFF5F5
+skinparam noteBorderColor #C53030
+skinparam titleFontSize 16
+
+start
+
+' ===== 事件源 =====
+:事件源（informer 回调 → queue.Add）
+- VMI informer: addDeleteFunc / updateFunc
+  v1.2.0: vm.go:3311 | v1.6.6: vm.go:202
+- Domain informer: addDomainFunc / updateDomainFunc
+  v1.2.0: vm.go:3327 / 3355 | v1.6.6: vm.go:2372 / 2398
+- requeue: shutdownVMI → AddAfter 5s
+  v1.2.0: vm.go:2370 | v1.6.6: vm.go:1673
+- 出错重试: AddRateLimited（指数退避）
+  v1.2.0: vm.go:1674 | v1.6.6: vm.go:296;
+
+:workqueue（client-go 延迟队列）
+Get() / Done() / AddAfter() / AddRateLimited();
+
+partition "worker × 10（并发，★ 单 key 互斥）" {
+  :worker Get(key) → key 标记 processing
+  同 key 的后续事件（AddAfter / domain 事件）只进 dirty 队列等待;
+
+  :execute → 主 reconcile
+  v1.2.0: execute(vm.go:2022) → defaultExecute(vm.go:1836)
+  v1.6.6: execute(vm.go:304) → sync(vm.go:1341)
+  每次入口打日志 "VMI is in phase: ..."（v1.2.0: 1858 | v1.6.6: 1362）;
+
+  if (判定分支) then (shouldShutdown)
+    :优雅关机
+    v1.2.0: processVmShutdown(vm.go:2300)
+      isACPIEnabled → handleVMIShutdown → shutdownVMI
+      ACPI_POWER_BTN 信号 + AddAfter 5s
+    v1.6.6: processVmShutdown(1550) → helperVmShutdown(1604)
+      → handleVMIShutdown(1637) → shutdownVMI + AddAfter 5s;
+  elseif (shouldDelete) then
+    :删除 domain
+    v1.2.0: processVmDelete(vm.go:2383)（只删 domain）
+    v1.6.6: deleteVM(vm.go:1312)
+      = processVmDelete + processVmCleanup 一步合并;
+  elseif (shouldCleanUp) then (仅 v1.2.0: vm.go:2115)
+    :本地清理（VMI final + domain 不存在 → 保守等待）
+    v1.6.6: 无此分支（final 清理合并进 deleteVM）;
+  else (shouldUpdate)
+    :更新 VMI status（processVmUpdate）
+    → updateVMIStatus → setVmPhaseForStatusReason;
+  endif
+
+  :Done(key) 释放 key → dirty 队列中的同 key 重新可被处理;
+}
+
+note right
+  ★ 单 key 互斥（问题机制根因）：
+  worker A Get(key) 后 key 标记 processing；
+  worker A 在 reconcile 内卡住期间，
+  同 key 的后续事件全部排队等待；
+  其他 9 个 worker 无法 Get 到该 key
+  → 只有 1 个 VM 被操作时，整个队列静默 60s+
+  → worker A 恢复后处理积压事件，
+    此时 domain 可能已被清理
+    （virt-launcher waitForFinalNotify 15s+30s 超时退出）
+  → calculateVmPhaseForStatusReason(domain=nil, vmi 非 final)
+    → Failed（v1.6.6: vm.go:2320 附近）
+  → RerunOnFailure 自动拉起
+end note
+
+stop
+
+@enduml
