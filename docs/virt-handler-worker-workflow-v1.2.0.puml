@@ -1,0 +1,76 @@
+@startuml
+' ============================================================
+' virt-handler worker 工作机制（v1.2.0）
+' 正常路径：domain shutoff → 及时 reconcile → Succeeded → 不重启
+' 代码位置: cmd/virt-handler/virt-handler.go 与 pkg/virt-handler/vm.go
+' ============================================================
+title virt-handler worker 工作机制（v1.2.0）
+hide empty description
+skinparam activityBackgroundColor #E6FFFA
+skinparam activityDiamondBackgroundColor #FFF3CD
+skinparam noteBackgroundColor #E6FFFA
+skinparam noteBorderColor #2C7A7B
+skinparam titleFontSize 16
+
+start
+
+:启动：cmd/virt-handler/virt-handler.go:416
+go vmController.Run(10, stop)   ← 10 个 worker
+另有 nodeLabeller.Run(10):332 / domainSharedInformer.Run:387;
+
+:事件源（informer 回调 → Queue.Add）
+- VMI informer: addDeleteFunc / updateFunc (vm.go:3311)
+- Domain informer: addDomainFunc (vm.go:3327)
+  / updateDomainFunc (vm.go:3355，打 "Domain is in state" 日志)
+- requeue: shutdownVMI → d.Queue.AddAfter 5s (vm.go:2370)
+- 出错重试: Queue.AddRateLimited (vm.go:1674);
+
+:workqueue: c.Queue（client-go 延迟队列）
+Get() / Done() / AddAfter() / AddRateLimited();
+
+partition "worker × 10（并发，单 key 互斥）" {
+  :worker Get(key) → key 标记 processing
+  同 key 后续事件进 dirty 队列等待
+  （vm.go:1653 wait.Until(runWorker,1s) / runWorker:1661 / Execute:1666）;
+
+  :主 reconcile: execute (vm.go:2022) → defaultExecute (vm.go:1836)
+  每次入口打日志 "VMI is in phase: ..." (vm.go:1858);
+
+  if (switch 判定 vm.go:1975) then (shouldShutdown)
+    :processVmShutdown (vm.go:2300)
+    isACPIEnabled 判断 → handleVMIShutdown → shutdownVMI
+    ACPI_POWER_BTN 信号 + AddAfter 5s (vm.go:2370)
+    ★ 优雅关机 requeue;
+  elseif (shouldDelete) then
+    :processVmDelete (vm.go:2383)
+    只删 domain（DeleteDomain RPC）
+    virt-launcher 收到删除通知 → waitForFinalNotify 返回 → 正常退出;
+  elseif (shouldCleanUp) then (★ 仅 v1.2.0)
+    :processVmCleanup (vm.go:2115)
+    VMI final + domain 不存在 → 本地清理（保守等待，不误判）
+    卸载/关闭 client / 删 domain 缓存;
+  else (shouldUpdate)
+    :processVmUpdate → updateVMIStatus
+    → setVmPhaseForStatusReason
+    domain shutoff:shutdown → Succeeded（正常）;
+  endif
+
+  :Done(key) 释放 key → dirty 队列重新可处理;
+}
+
+note right
+  ★ 单 key 互斥 + v1.2.0 正常路径
+  worker Get(key) 后 key 标记 processing，同 key 后续事件进 dirty 队列等待，
+  其他 worker 无法并发处理同 key。
+
+  正常流程：domain shutoff（reason=shutdown）→ domain 事件触发 reconcile（1ms 内）
+  → shouldDelete → processVmDelete（删 domain）→ virt-launcher 正常退出
+  → 下一轮 VMI final → shouldCleanUp → VMI=Succeeded → 不重启（正常）
+
+  实测时序：08:32:05.921 shutoff → 08:32:05.922 Signaled deletion
+  → 08:32:05.987 Succeeded
+end note
+
+stop
+
+@enduml

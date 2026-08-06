@@ -1,0 +1,81 @@
+@startuml
+' ============================================================
+' virt-handler worker 工作机制（v1.6.6）
+' 失败路径：domain shutoff → worker 卡 60s → virt-launcher 超时退出
+'   → domain 消失 → Failed → RerunOnFailure 自动拉起
+' 代码位置: cmd/virt-handler/virt-handler.go 与 pkg/virt-handler/vm.go
+' ============================================================
+title virt-handler worker 工作机制（v1.6.6）
+hide empty description
+skinparam activityBackgroundColor #FFF5F5
+skinparam activityDiamondBackgroundColor #FFF3CD
+skinparam noteBackgroundColor #FFF5F5
+skinparam noteBorderColor #C53030
+skinparam titleFontSize 16
+
+start
+
+:启动：cmd/virt-handler/virt-handler.go:466-468
+go vmController.Run(10, stop)   ← 10 个 worker
+另有 migrationSource.Run(5):466 / migrationTarget.Run(5):467
+  / domainSharedInformer.Run:425;
+
+:事件源（informer 回调 → queue.Add）
+- VMI informer (vm.go:202): addDeleteFunc / updateFunc
+- Domain informer (vm.go:208): addDomainFunc (vm.go:2372)
+  / deleteDomainFunc (2378) / updateDomainFunc (2398)
+  ★ 主流程 updateDomainFunc 不打 "Domain is in state" 日志
+  （该日志移到 migration-target.go:819）
+- requeue: shutdownVMI → c.queue.AddAfter 5s (vm.go:1673)
+- 出错重试: queue.AddRateLimited (vm.go:296);
+
+:workqueue: c.queue（client-go 延迟队列）
+Get() / Done() / AddAfter() / AddRateLimited();
+
+partition "worker × 10（并发，单 key 互斥）" {
+  :worker Get(key) → key 标记 processing
+  同 key 后续事件进 dirty 队列等待
+  （vm.go:240 Run / 268 wait.Until(runWorker,1s) / 294 runWorker / 288 Execute）;
+
+  :主 reconcile: execute (vm.go:304) → sync (vm.go:1341)
+  每次入口打日志 "VMI is in phase: ..." (vm.go:1362);
+
+  if (switch 判定 vm.go:1432) then (shouldShutdown)
+    :processVmShutdown (1550) → helperVmShutdown (1604)
+    → handleVMIShutdown (1637)
+    domainHasGracePeriod 触发 → shutdownVMI + AddAfter 5s (1673)
+    ★ domain 变 ShuttingDown 后 handleVMIShutdown 直接返回
+     requeue 停止（原逻辑）;
+  elseif (shouldDelete) then
+    :deleteVM (vm.go:1312)
+    = processVmDelete + processVmCleanup 一步合并
+    ★ VMI 删除中 + domain 不存在 + VMI 非 final 也执行
+     processVmCleanup（激进；v1.2.0 此时是 shouldCleanUp 等待）;
+  else (shouldUpdate)
+    :processVmUpdate → updateVMIStatus
+    → setVmPhaseForStatusReason
+    domain shutoff:shutdown → Succeeded（正常）
+    domain == nil + vmi 非 final → Failed（误判，vm.go:2320 附近）
+    → RerunOnFailure 自动拉起;
+  endif
+
+  :Done(key) 释放 key → dirty 队列重新可处理;
+}
+
+note right
+  ★ 单 key 互斥 + v1.6.6 失败路径
+  worker Get(key) 后 key 标记 processing，同 key 后续事件进 dirty 队列等待，
+  其他 worker 无法并发处理同 key。
+
+  失败流程：09:24:50 信号 → 09:24:57 domain shutoff
+  → ★ worker 卡 60s（卡点待定位：锁/RPC/IO，需 goroutine 栈确认）
+  → 该 key 的 AddAfter(5s) / domain 事件全部排队
+  → 09:25:43 virt-launcher waitForFinalNotify 45s 超时退出（notify pipe 关闭）
+  → 09:25:55 worker 恢复 → domain 已从缓存消失
+  → sync 判定: domain==nil + vmi 非 final → Failed
+  → RerunOnFailure 自动拉起（误判）
+end note
+
+stop
+
+@enduml
