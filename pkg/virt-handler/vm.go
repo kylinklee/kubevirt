@@ -1635,10 +1635,28 @@ func (c *VirtualMachineController) helperVmShutdown(vmi *v1.VirtualMachineInstan
 }
 
 func (c *VirtualMachineController) handleVMIShutdown(vmi *v1.VirtualMachineInstance, domain *api.Domain, client cmdclient.LauncherClient, timeLeft int64) error {
+	// [升级兼容] 优雅关机已完成（domain 已 shutoff 且 reason 为 shutdown）时直接返回，
+	// 不再重发关机信号，由主 reconcile 完成 Succeeded 判定与 domain 清理。
+	// 原逻辑在此场景会继续走 shutdownVMI 重发信号并依赖 gracePeriod 超时兜底；
+	// 若 virt-handler reconcile 延迟，virt-launcher 会因等不到 domain 删除通知而
+	// 超时退出（waitForFinalNotify 最长约 45s），domain 随后从缓存消失，
+	// VMI 被误判为 Failed，触发 RerunOnFailure 自动拉起。
+	if domain.Status.Status == api.Shutoff && domain.Status.Reason == api.ReasonShutdown {
+		log.Log.Object(vmi).Infof("Domain %s has already shut down gracefully, finalizing vmi", vmi.GetObjectMeta().GetName())
+		return nil
+	}
+
 	if domain.Status.Status != api.Shutdown {
 		return c.shutdownVMI(vmi, client, timeLeft)
 	}
 	log.Log.V(4).Object(vmi).Infof("%s is already shutting down.", vmi.GetObjectMeta().GetName())
+
+	// [升级兼容] 保持 requeue：domain 正在优雅关机中时，原逻辑直接返回且不再
+	// 触发任何队列重入，若 domain 关闭完成事件未被及时处理（reconcile 延迟），
+	// 后续将无人再推动该 VMI 的 Succeeded 判定与 domain 清理。
+	// 这里每 5 秒重入一次，确保 domain shutoff 后能尽快完成判定，
+	// 避免 virt-launcher 超时退出导致 VMI 被判 Failed 自动拉起。
+	c.queue.AddAfter(controller.VirtualMachineInstanceKey(vmi), time.Second*5)
 	return nil
 }
 
