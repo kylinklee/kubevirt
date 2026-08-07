@@ -194,6 +194,53 @@ kubectl logs -n kubevirt -l kubevirt.io=virt-controller --since=10m | grep -i "s
 
 ---
 
+## 9. 补充发现：v1.6.6 缺失 "Signaled deletion" 日志的证据链
+
+**现象**：v1.2.0 日志有 `Signaled deletion for 27f237e6...`（08:32:05.922，vm.go:2383），v1.6.6 日志（09:25:55 附近）**没有**。
+
+**原因**：该日志只在 `GetVerifiedLauncherClient` 成功（virt-launcher 连接存活）时打印：
+
+```go
+// v1.6.6 vm.go:1678 / v1.2.0 vm.go:2375（两版本完全相同）
+func processVmDelete(vmi) error {
+	client, err := c.launcherClients.GetVerifiedLauncherClient(vmi)
+	if err == nil {                                    // ★ 连接活着才进来
+		log.Log.Object(vmi).Infof("Signaled deletion for %s", ...)  // ← 这条日志
+		c.recorder.Event(...)
+		err = client.DeleteDomain(vmi)                 // ★ DeleteDomain RPC（virt-launcher 删除通知的来源）
+		...
+	}
+	return nil
+}
+```
+
+**v1.6.6 缺失的原因**：
+```
+09:25:43  virt-launcher 已超时退出（45s 等不到删除通知）
+09:25:55  processVmDelete 才执行 → GetVerifiedLauncherClient 返回 err（连接已断）
+          → if err == nil 不成立 → 不打日志 → 不发 DeleteDomain → 直接 return nil
+```
+
+**深层意义（关键闭环证据）**：`DeleteDomain` RPC 正是 virt-launcher `waitForFinalNotify`（virt-launcher.go:279-330）等待的删除通知：
+```
+v1.2.0:  virt-handler 及时发 DeleteDomain（shutoff 后 1ms）→ virt-launcher 收到通知
+         → 08:32:06.394 "Waiting on final notifications" → 正常退出 ✓
+v1.6.6:  ★ virt-handler 卡 60s 没发 DeleteDomain → virt-launcher 等 45s 超时 → 自己退出（09:25:43）
+         → 退出后 processVmDelete 才执行 → 连接已断 → Signaled deletion 缺失（DeleteDomain 从未发出）✗
+```
+
+**"Signaled deletion 缺失" = "virt-handler 删 domain 太晚（virt-launcher 已退）"的直接日志证据**，与第 5 节时序推演完全闭环：
+
+| 证据（v1.6.6 日志） | 含义 |
+|------|------|
+| 65s 无 "VMI is in phase" 日志 | virt-handler 该 key 未被 worker 处理（卡 60s） |
+| virt-launcher 09:25:43 退出 | waitForFinalNotify 45s 超时（没等到 DeleteDomain） |
+| **缺 "Signaled deletion"** | **DeleteDomain 从未发出（processVmDelete 执行时连接已断）** |
+| virt-controller 写 Failed（lifecycle.go:416） | VMI Running + pod 消失 |
+| virt-handler 入口见 "VMI is in phase: Failed" | 恢复太晚，VMI 已被 virt-controller 置 Failed |
+
+---
+
 ## 附：相关代码位置索引
 
 | 内容 | v1.2.0 | v1.6.6 |
