@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"runtime/debug"
 	"strings"
-	"sync"
 	"time"
 
 	k8sv1 "k8s.io/api/core/v1"
@@ -167,43 +166,11 @@ func NewListWatchFromClient(c cache.Getter, resource string, namespace string, f
 			}
 			return nil, err
 		}
-		if debugWatch {
-			return &debugListWatch{Interface: w, resource: resource, selector: options.LabelSelector}, nil
-		}
+		// 注意：不能包装 watch.Interface 的 ResultChan——client-go 契约要求
+		// ResultChan 每次返回同一个 channel，包装会破坏事件消费（导致丢事件）
 		return w, nil
 	}
 	return &cache.ListWatch{ListFunc: listFunc, WatchFunc: watchFunc}
-}
-
-// debugListWatch 包装 watch.Interface，记录事件到达 Reflector 的时刻（临时，定位后移除）。
-// 注意：必须遵守 client-go 契约——ResultChan() 每次返回同一个 channel
-// （用 sync.Once 保证），单 goroutine 保序转发，否则会丢事件。
-type debugListWatch struct {
-	watch.Interface
-	resource string
-	selector string
-	once     sync.Once
-	ch       chan watch.Event
-}
-
-func (w *debugListWatch) ResultChan() <-chan watch.Event {
-	w.once.Do(func() {
-		w.ch = make(chan watch.Event, 1024)
-		go func() {
-			defer close(w.ch)
-			for ev := range w.Interface.ResultChan() {
-				if ev.Type == watch.Error {
-					log.Log.Infof("[debug] listwatch: watch ERROR event for %s (selector=%s): %v", w.resource, w.selector, ev.Object)
-				} else {
-					obj := ev.Object.(metav1.Object)
-					log.Log.Infof("[debug] listwatch: watch event for %s (selector=%s) type=%s obj=%s/%s", w.resource, w.selector, ev.Type, obj.GetNamespace(), obj.GetName())
-				}
-				w.ch <- ev
-			}
-			log.Log.Infof("[debug] listwatch: watch channel closed for %s (selector=%s)", w.resource, w.selector)
-		}()
-	})
-	return w.ch
 }
 
 func HandlePanic() {
