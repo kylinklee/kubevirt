@@ -302,13 +302,12 @@ func (c *VirtualMachineController) Execute() bool {
 }
 
 func (c *VirtualMachineController) execute(key string) error {
-	// [调试日志] execute 入口卡点探测（临时，定位后移除）
+	// [调试日志] 定位 VMI 更新事件延迟问题：确认 reconcile 触发（临时，定位后移除）
 	log.Log.Infof("[debug] execute: start key=%s", key)
 	vmi, vmiExists, err := c.getVMIFromCache(key)
 	if err != nil {
 		return err
 	}
-	log.Log.Infof("[debug] execute: after getVMIFromCache vmiExists=%v", vmiExists)
 
 	if !vmiExists {
 		// the vmiInformer probably has to catch up to the domainInformer
@@ -328,19 +327,18 @@ func (c *VirtualMachineController) execute(key string) error {
 	if !vmiExists {
 		c.vmiExpectations.DeleteExpectations(key)
 	} else if !c.vmiExpectations.SatisfiedExpectations(key) {
-		// [调试日志] 定位 Stop 后 VMI 自动拉起问题：卡点探测（临时，定位后移除）
-		// expectations 未满足时静默跳过——若此日志在 65 秒空白期间反复出现，
-		// 证明根因是 informer 的 VMI 更新事件延迟（expectations 未被消费）。
+		// [调试日志] 定位 VMI 更新事件延迟问题：expectations 未满足时静默跳过
+		// （临时，定位后移除）。若此日志与 informer 事件日志对比，能确认
+		// "事件到达但 expectations 未清账" 还是 "事件根本没到达"。
 		log.Log.Object(vmi).Infof("[debug] execute: expectations not satisfied, skipping reconcile")
 		return nil
 	}
-	log.Log.Object(vmi).Infof("[debug] execute: expectations satisfied")
 
 	domain, domainExists, domainCachedUID, err := c.getDomainFromCache(key)
 	if err != nil {
 		return err
 	}
-	log.Log.Object(vmi).Infof("[debug] execute: after getDomainFromCache domainExists=%v", domainExists)
+	log.Log.Object(vmi).V(4).Infof("domain exists %v", domainExists)
 
 	if !vmiExists && string(domainCachedUID) != "" {
 		// it's possible to discover the UID from cache even if the domain
@@ -368,7 +366,6 @@ func (c *VirtualMachineController) execute(key string) error {
 		}
 		// If we found an outdated domain which is also not alive anymore, clean up
 		if !initialized {
-			log.Log.Object(vmi).Infof("[debug] execute: stale domain not initialized, requeue in 1s")
 			c.queue.AddAfter(controller.VirtualMachineInstanceKey(vmi), time.Second*1)
 			return nil
 		} else if expired {
@@ -388,7 +385,6 @@ func (c *VirtualMachineController) execute(key string) error {
 	if domainExists &&
 		(domainMigrated(domain) || domain.DeletionTimestamp != nil) {
 		log.Log.Object(vmi).V(4).Info("detected orphan vmi")
-		log.Log.Object(vmi).Infof("[debug] execute: orphan vmi, calling deleteVM")
 		return c.deleteVM(vmi)
 	}
 
@@ -402,31 +398,24 @@ func (c *VirtualMachineController) execute(key string) error {
 
 	if vmi.DeletionTimestamp == nil && isMigrationInProgress(vmi, domain) {
 		log.Log.V(4).Infof("ignoring key %v as migration is in progress", key)
-		log.Log.Object(vmi).Infof("[debug] execute: migration in progress, skipping")
 		return nil
 	}
 
 	if vmiExists && !c.isVMIOwnedByNode(vmi) {
 		log.Log.Object(vmi).V(4).Info("ignoring vmi as it is not owned by this node")
-		log.Log.Object(vmi).Infof("[debug] execute: vmi not owned by this node, skipping")
 		return nil
 	}
 
 	if vmiExists && vmi.IsMigrationSource() {
 		log.Log.Object(vmi).V(4).Info("ignoring vmi as it is a migration source")
-		log.Log.Object(vmi).Infof("[debug] execute: vmi is migration source, skipping")
 		return nil
 	}
 
-	// [调试日志] execute 入口卡点探测（临时，定位后移除）
-	log.Log.Object(vmi).Infof("[debug] execute: calling sync")
-	err = c.sync(key,
+	return c.sync(key,
 		vmi.DeepCopy(),
 		vmiExists,
 		domain,
 		domainExists)
-	log.Log.Object(vmi).Infof("[debug] execute: sync returned err=%v", err)
-	return err
 
 }
 
@@ -1043,29 +1032,19 @@ func (c *VirtualMachineController) updateMemoryInfo(vmi *v1.VirtualMachineInstan
 }
 
 func (c *VirtualMachineController) updateVMIStatusFromDomain(vmi *v1.VirtualMachineInstance, domain *api.Domain) error {
-	// [调试日志] 定位 Stop 后 VMI 自动拉起问题：卡点探测（临时，定位后移除）
-	log.Log.Object(vmi).Infof("[debug] updateVMIStatusFromDomain: start")
 	c.updateIsoSizeStatus(vmi)
-	log.Log.Object(vmi).Infof("[debug] updateVMIStatusFromDomain: after updateIsoSizeStatus")
 	err := c.updateSELinuxContext(vmi)
 	if err != nil {
 		log.Log.Reason(err).Errorf("couldn't find the SELinux context for %s", vmi.Name)
 	}
-	log.Log.Object(vmi).Infof("[debug] updateVMIStatusFromDomain: after updateSELinuxContext")
 	c.updateGuestInfoFromDomain(vmi, domain)
-	log.Log.Object(vmi).Infof("[debug] updateVMIStatusFromDomain: after updateGuestInfoFromDomain")
 	c.updateVolumeStatusesFromDomain(vmi, domain)
-	log.Log.Object(vmi).Infof("[debug] updateVMIStatusFromDomain: after updateVolumeStatusesFromDomain")
 	c.updateFSFreezeStatus(vmi, domain)
-	log.Log.Object(vmi).Infof("[debug] updateVMIStatusFromDomain: after updateFSFreezeStatus")
 	c.updateMachineType(vmi, domain)
-	log.Log.Object(vmi).Infof("[debug] updateVMIStatusFromDomain: after updateMachineType")
 	if err = c.updateMemoryInfo(vmi, domain); err != nil {
 		return err
 	}
-	log.Log.Object(vmi).Infof("[debug] updateVMIStatusFromDomain: after updateMemoryInfo")
 	err = c.netStat.UpdateStatus(vmi, domain)
-	log.Log.Object(vmi).Infof("[debug] updateVMIStatusFromDomain: after netStat.UpdateStatus")
 	return err
 }
 
@@ -1102,41 +1081,31 @@ func (c *VirtualMachineController) updateVMIStatus(oldStatus *v1.VirtualMachineI
 	}
 
 	// Update conditions on VMI Status
-	// [调试日志] 定位 Stop 后 VMI 自动拉起问题：卡点探测（临时，定位后移除）
-	log.Log.Object(vmi).Infof("[debug] updateVMIStatus: before updateVMIConditions")
 	err = c.updateVMIConditions(vmi, domain, condManager)
 	if err != nil {
 		return err
 	}
-	log.Log.Object(vmi).Infof("[debug] updateVMIStatus: after updateVMIConditions")
 
 	// Store containerdisks and kernelboot checksums
 	if err := c.updateChecksumInfo(vmi, syncError); err != nil {
 		return err
 	}
-	log.Log.Object(vmi).Infof("[debug] updateVMIStatus: after updateChecksumInfo")
 
 	// Handle sync error
 	handleSyncError(vmi, condManager, syncError)
-	log.Log.Object(vmi).Infof("[debug] updateVMIStatus: after handleSyncError")
 
 	controller.SetVMIPhaseTransitionTimestamp(oldStatus, &vmi.Status)
-	log.Log.Object(vmi).Infof("[debug] updateVMIStatus: after SetVMIPhaseTransitionTimestamp")
 
 	// Only issue vmi update if status has changed
 	if !equality.Semantic.DeepEqual(*oldStatus, vmi.Status) {
 		key := controller.VirtualMachineInstanceKey(vmi)
 		c.vmiExpectations.SetExpectations(key, 1, 0)
-		log.Log.Object(vmi).Infof("[debug] updateVMIStatus: before VMI Update API call")
 		_, err := c.clientset.VirtualMachineInstance(vmi.ObjectMeta.Namespace).Update(context.Background(), vmi, metav1.UpdateOptions{})
 		if err != nil {
 			c.vmiExpectations.SetExpectations(key, 0, 0)
-			log.Log.Object(vmi).Infof("[debug] updateVMIStatus: VMI Update API call failed: %v", err)
 			return err
 		}
-		log.Log.Object(vmi).Infof("[debug] updateVMIStatus: VMI Update API call succeeded")
 	}
-	log.Log.Object(vmi).Infof("[debug] updateVMIStatus: done")
 
 	// Record an event on the VMI when the VMI's phase changes
 	if oldStatus.Phase != vmi.Status.Phase {
@@ -1538,13 +1507,10 @@ func (c *VirtualMachineController) sync(key string,
 	// Update the VirtualMachineInstance status, if the VirtualMachineInstance exists
 	if vmiExists {
 		vmi.Spec = *oldSpec
-		// [调试日志] 定位 Stop 后 VMI 自动拉起问题：卡点探测（临时，定位后移除）
-		log.Log.Object(vmi).Infof("[debug] sync: before updateVMIStatus (domain exists=%v)", domainExists)
 		if err := c.updateVMIStatus(oldStatus, vmi, domain, syncErr); err != nil {
 			log.Log.Object(vmi).Reason(err).Error("Updating the VirtualMachineInstance status failed.")
 			return err
 		}
-		log.Log.Object(vmi).Infof("[debug] sync: after updateVMIStatus")
 	}
 
 	if syncErr != nil {
@@ -2426,6 +2392,8 @@ func (c *VirtualMachineController) calculateVmPhaseForStatusReason(domain *api.D
 func (c *VirtualMachineController) addDeleteFunc(obj interface{}) {
 	key, err := controller.KeyFunc(obj)
 	if err == nil {
+		// [调试日志] 定位 VMI 更新事件延迟问题：确认 add/delete 事件是否到达（临时，定位后移除）
+		log.Log.Infof("[debug] informer: vmi add/delete event for %s", key)
 		c.vmiExpectations.SetExpectations(key, 0, 0)
 		c.queue.Add(key)
 	}
@@ -2434,6 +2402,8 @@ func (c *VirtualMachineController) addDeleteFunc(obj interface{}) {
 func (c *VirtualMachineController) updateFunc(_, new interface{}) {
 	key, err := controller.KeyFunc(new)
 	if err == nil {
+		// [调试日志] 定位 VMI 更新事件延迟问题：确认 update 事件是否到达（临时，定位后移除）
+		log.Log.Infof("[debug] informer: vmi update event for %s", key)
 		c.vmiExpectations.SetExpectations(key, 0, 0)
 		c.queue.Add(key)
 	}
@@ -2442,6 +2412,8 @@ func (c *VirtualMachineController) updateFunc(_, new interface{}) {
 func (c *VirtualMachineController) addDomainFunc(obj interface{}) {
 	key, err := controller.KeyFunc(obj)
 	if err == nil {
+		// [调试日志] 定位 VMI 更新事件延迟问题：domain 事件对照（临时，定位后移除）
+		log.Log.Infof("[debug] informer: domain add event for %s", key)
 		c.queue.Add(key)
 	}
 }
@@ -2462,12 +2434,16 @@ func (c *VirtualMachineController) deleteDomainFunc(obj interface{}) {
 	log.Log.V(3).Object(domain).Info("Domain deleted")
 	key, err := controller.KeyFunc(obj)
 	if err == nil {
+		// [调试日志] 定位 VMI 更新事件延迟问题：domain 事件对照（临时，定位后移除）
+		log.Log.Infof("[debug] informer: domain delete event for %s", key)
 		c.queue.Add(key)
 	}
 }
 func (c *VirtualMachineController) updateDomainFunc(_, new interface{}) {
 	key, err := controller.KeyFunc(new)
 	if err == nil {
+		// [调试日志] 定位 VMI 更新事件延迟问题：domain 事件对照（临时，定位后移除）
+		log.Log.Infof("[debug] informer: domain update event for %s", key)
 		c.queue.Add(key)
 	}
 }
