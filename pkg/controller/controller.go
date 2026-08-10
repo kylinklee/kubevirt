@@ -132,9 +132,15 @@ func (p *PodCacheStore) CurrentPod(vmi *v1.VirtualMachineInstance) (*k8sv1.Pod, 
 
 // NewListWatchFromClient creates a new ListWatch from the specified client, resource, kubevirtNamespace and field selector.
 func NewListWatchFromClient(c cache.Getter, resource string, namespace string, fieldSelector fields.Selector, labelSelector labels.Selector) *cache.ListWatch {
+	// [调试日志] 定位 VMI watch 事件延迟问题：只对 virtualmachineinstances 记录
+	// watch 生命周期（建立/错误/事件/关闭），确认事件是否到达 Reflector（临时，定位后移除）
+	debugWatch := resource == "virtualmachineinstances"
 	listFunc := func(options metav1.ListOptions) (runtime.Object, error) {
 		options.FieldSelector = fieldSelector.String()
 		options.LabelSelector = labelSelector.String()
+		if debugWatch {
+			log.Log.Infof("[debug] listwatch: listing %s (labelSelector=%s)", resource, options.LabelSelector)
+		}
 		return c.Get().
 			Namespace(namespace).
 			Resource(resource).
@@ -146,13 +152,49 @@ func NewListWatchFromClient(c cache.Getter, resource string, namespace string, f
 		options.FieldSelector = fieldSelector.String()
 		options.LabelSelector = labelSelector.String()
 		options.Watch = true
-		return c.Get().
+		if debugWatch {
+			log.Log.Infof("[debug] listwatch: starting watch for %s (labelSelector=%s rv=%s)", resource, options.LabelSelector, options.ResourceVersion)
+		}
+		w, err := c.Get().
 			Namespace(namespace).
 			Resource(resource).
 			VersionedParams(&options, metav1.ParameterCodec).
 			Watch(context.Background())
+		if err != nil {
+			if debugWatch {
+				log.Log.Infof("[debug] listwatch: watch start FAILED for %s: %v", resource, err)
+			}
+			return nil, err
+		}
+		if debugWatch {
+			return &debugListWatch{Interface: w, resource: resource}, nil
+		}
+		return w, nil
 	}
 	return &cache.ListWatch{ListFunc: listFunc, WatchFunc: watchFunc}
+}
+
+// debugListWatch 包装 watch.Interface，记录事件到达 Reflector 的时间（临时，定位后移除）。
+type debugListWatch struct {
+	watch.Interface
+	resource string
+}
+
+func (w *debugListWatch) ResultChan() <-chan watch.Event {
+	out := make(chan watch.Event)
+	go func() {
+		defer close(out)
+		for ev := range w.Interface.ResultChan() {
+			if ev.Type == watch.Error {
+				log.Log.Infof("[debug] listwatch: watch error event for %s: %v", w.resource, ev.Object)
+			} else {
+				log.Log.Infof("[debug] listwatch: watch event for %s type=%s", w.resource, ev.Type)
+			}
+			out <- ev
+		}
+		log.Log.Infof("[debug] listwatch: watch channel closed for %s", w.resource)
+	}()
+	return out
 }
 
 func HandlePanic() {
