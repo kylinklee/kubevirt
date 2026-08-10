@@ -155,6 +155,10 @@ func NewListWatchFromClient(c cache.Getter, resource string, namespace string, f
 		if debugWatch {
 			log.Log.Infof("[debug] listwatch: starting watch for %s (labelSelector=%s rv=%s)", resource, options.LabelSelector, options.ResourceVersion)
 		}
+		// [claude] 临时探针：记录 Watch() 调用的耗时。初始触发定位需要区分 43s 空窗
+		// 中 Watch() 请求是否 hang（若这里打时间戳、下一次事件到达远晚于此即 hang），
+		// 也用于与 informer 事件 rv 断裂对照。定位完成后移除。
+		watchStart := time.Now()
 		w, err := c.Get().
 			Namespace(namespace).
 			Resource(resource).
@@ -165,6 +169,9 @@ func NewListWatchFromClient(c cache.Getter, resource string, namespace string, f
 				log.Log.Infof("[debug] listwatch: watch start FAILED for %s: %v", resource, err)
 			}
 			return nil, err
+		}
+		if debugWatch {
+			log.Log.Infof("[debug] listwatch: watch established for %s rv=%s in %v", resource, options.ResourceVersion, time.Since(watchStart))
 		}
 		// 注意：不能包装 watch.Interface 的 ResultChan——client-go 契约要求
 		// ResultChan 每次返回同一个 channel，包装会破坏事件消费（导致丢事件）

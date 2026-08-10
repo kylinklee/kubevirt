@@ -330,7 +330,9 @@ func (c *VirtualMachineController) execute(key string) error {
 		// [调试日志] 定位 VMI 更新事件延迟问题：expectations 未满足时静默跳过
 		// （临时，定位后移除）。若此日志与 informer 事件日志对比，能确认
 		// "事件到达但 expectations 未清账" 还是 "事件根本没到达"。
-		log.Log.Object(vmi).Infof("[debug] execute: expectations not satisfied, skipping reconcile")
+		// [claude] 附加 rv：配合 P1/P2 对照"最后到达的事件 rv"，判断跳过时
+		// 本地 informer 缓存里 VMI 的 rv 是否已更新（区分事件是否已到）。
+		log.Log.Object(vmi).Infof("[debug] execute: expectations not satisfied, skipping reconcile rv=%s", vmi.ResourceVersion)
 		return nil
 	}
 
