@@ -1100,11 +1100,14 @@ func (c *VirtualMachineController) updateVMIStatus(oldStatus *v1.VirtualMachineI
 	if !equality.Semantic.DeepEqual(*oldStatus, vmi.Status) {
 		key := controller.VirtualMachineInstanceKey(vmi)
 		c.vmiExpectations.SetExpectations(key, 1, 0)
-		_, err := c.clientset.VirtualMachineInstance(vmi.ObjectMeta.Namespace).Update(context.Background(), vmi, metav1.UpdateOptions{})
+		updated, err := c.clientset.VirtualMachineInstance(vmi.ObjectMeta.Namespace).Update(context.Background(), vmi, metav1.UpdateOptions{})
 		if err != nil {
 			c.vmiExpectations.SetExpectations(key, 0, 0)
 			return err
 		}
+		// [claude] 临时探针：记录 Update 成功返回的 rv，用于与 informer 事件 rv（P2）
+		// 对照，定位"哪一笔写被存储广播丢弃"（初始触发时刻）。定位完成后移除。
+		log.Log.Infof("[debug] updateVMIStatus: Update ok rv=%s key=%s", updated.ResourceVersion, key)
 	}
 
 	// Record an event on the VMI when the VMI's phase changes
@@ -2402,8 +2405,14 @@ func (c *VirtualMachineController) addDeleteFunc(obj interface{}) {
 func (c *VirtualMachineController) updateFunc(_, new interface{}) {
 	key, err := controller.KeyFunc(new)
 	if err == nil {
-		// [调试日志] 定位 VMI 更新事件延迟问题：确认 update 事件是否到达（临时，定位后移除）
-		log.Log.Infof("[debug] informer: vmi update event for %s", key)
+		// [claude] 临时探针：事件到达时打印 rv，与 P1 的 Update 返回 rv 对照，
+		// 判断"最后到达的事件 rv"与"下一笔 Update rv"是否断裂（定位存储广播
+		// 丢弃的那笔写）。定位完成后移除。
+		if vmi, ok := new.(*v1.VirtualMachineInstance); ok {
+			log.Log.Infof("[debug] informer: vmi update event rv=%s for %s", vmi.ResourceVersion, key)
+		} else {
+			log.Log.Infof("[debug] informer: vmi update event for %s", key)
+		}
 		c.vmiExpectations.SetExpectations(key, 0, 0)
 		c.queue.Add(key)
 	}
