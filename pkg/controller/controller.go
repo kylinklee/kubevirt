@@ -166,35 +166,11 @@ func NewListWatchFromClient(c cache.Getter, resource string, namespace string, f
 			}
 			return nil, err
 		}
-		if debugWatch {
-			return &debugListWatch{Interface: w, resource: resource}, nil
-		}
+		// 注意：不能包装 watch.Interface 的 ResultChan——client-go 契约要求
+		// ResultChan 每次返回同一个 channel，包装会破坏事件消费（导致丢事件）
 		return w, nil
 	}
 	return &cache.ListWatch{ListFunc: listFunc, WatchFunc: watchFunc}
-}
-
-// debugListWatch 包装 watch.Interface，记录事件到达 Reflector 的时间（临时，定位后移除）。
-type debugListWatch struct {
-	watch.Interface
-	resource string
-}
-
-func (w *debugListWatch) ResultChan() <-chan watch.Event {
-	out := make(chan watch.Event)
-	go func() {
-		defer close(out)
-		for ev := range w.Interface.ResultChan() {
-			if ev.Type == watch.Error {
-				log.Log.Infof("[debug] listwatch: watch error event for %s: %v", w.resource, ev.Object)
-			} else {
-				log.Log.Infof("[debug] listwatch: watch event for %s type=%s", w.resource, ev.Type)
-			}
-			out <- ev
-		}
-		log.Log.Infof("[debug] listwatch: watch channel closed for %s", w.resource)
-	}()
-	return out
 }
 
 func HandlePanic() {
