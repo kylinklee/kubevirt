@@ -39,6 +39,7 @@ import (
 
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/errors"
@@ -1105,6 +1106,16 @@ func (c *VirtualMachineController) updateVMIStatus(oldStatus *v1.VirtualMachineI
 		updated, err := c.clientset.VirtualMachineInstance(vmi.ObjectMeta.Namespace).Update(context.Background(), vmi, metav1.UpdateOptions{})
 		if err != nil {
 			c.vmiExpectations.SetExpectations(key, 0, 0)
+			// [升级兼容] 减轻写风暴：409 乐观锁冲突（与 virt-controller 竞争同一 VMI 的
+			// status 更新）时不返回 err，避免触发 AddRateLimited 立即重试。立即重试会
+			// 与 virt-controller 再次竞争，形成 409 重试风暴；高并发写同一 VMI 会触发
+			// 后端存储（ccdb）的并发事务 revision 冲突（row_count not zero），进而导致
+			// watch 推送停摆。409 的 status 更新留待下一次 reconcile（AddAfter 5s /
+			// 事件驱动）自然重试，状态最终一致且消除竞争风暴。
+			if apierrors.IsConflict(err) {
+				log.Log.Object(vmi).Infof("VMI status update conflict (409), deferring to next reconcile: %v", err)
+				return nil
+			}
 			return err
 		}
 		// [claude] 临时探针：记录 Update 成功返回的 rv，用于与 informer 事件 rv（P2）
