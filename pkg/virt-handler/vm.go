@@ -39,7 +39,6 @@ import (
 
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/errors"
@@ -303,8 +302,6 @@ func (c *VirtualMachineController) Execute() bool {
 }
 
 func (c *VirtualMachineController) execute(key string) error {
-	// [调试日志] 定位 VMI 更新事件延迟问题：确认 reconcile 触发（临时，定位后移除）
-	log.Log.Infof("[debug] execute: start key=%s", key)
 	vmi, vmiExists, err := c.getVMIFromCache(key)
 	if err != nil {
 		return err
@@ -328,12 +325,6 @@ func (c *VirtualMachineController) execute(key string) error {
 	if !vmiExists {
 		c.vmiExpectations.DeleteExpectations(key)
 	} else if !c.vmiExpectations.SatisfiedExpectations(key) {
-		// [调试日志] 定位 VMI 更新事件延迟问题：expectations 未满足时静默跳过
-		// （临时，定位后移除）。若此日志与 informer 事件日志对比，能确认
-		// "事件到达但 expectations 未清账" 还是 "事件根本没到达"。
-		// [claude] 附加 rv：配合 P1/P2 对照"最后到达的事件 rv"，判断跳过时
-		// 本地 informer 缓存里 VMI 的 rv 是否已更新（区分事件是否已到）。
-		log.Log.Object(vmi).Infof("[debug] execute: expectations not satisfied, skipping reconcile rv=%s", vmi.ResourceVersion)
 		return nil
 	}
 
@@ -1106,21 +1097,8 @@ func (c *VirtualMachineController) updateVMIStatus(oldStatus *v1.VirtualMachineI
 		updated, err := c.clientset.VirtualMachineInstance(vmi.ObjectMeta.Namespace).Update(context.Background(), vmi, metav1.UpdateOptions{})
 		if err != nil {
 			c.vmiExpectations.SetExpectations(key, 0, 0)
-			// [升级兼容] 减轻写风暴：409 乐观锁冲突（与 virt-controller 竞争同一 VMI 的
-			// status 更新）时不返回 err，避免触发 AddRateLimited 立即重试。立即重试会
-			// 与 virt-controller 再次竞争，形成 409 重试风暴；高并发写同一 VMI 会触发
-			// 后端存储（ccdb）的并发事务 revision 冲突（row_count not zero），进而导致
-			// watch 推送停摆。409 的 status 更新留待下一次 reconcile（AddAfter 5s /
-			// 事件驱动）自然重试，状态最终一致且消除竞争风暴。
-			if apierrors.IsConflict(err) {
-				log.Log.Object(vmi).Infof("VMI status update conflict (409), deferring to next reconcile: %v", err)
-				return nil
-			}
 			return err
 		}
-		// [claude] 临时探针：记录 Update 成功返回的 rv，用于与 informer 事件 rv（P2）
-		// 对照，定位"哪一笔写被存储广播丢弃"（初始触发时刻）。定位完成后移除。
-		log.Log.Infof("[debug] updateVMIStatus: Update ok rv=%s key=%s", updated.ResourceVersion, key)
 		// [升级兼容] no-op 检测：Update 返回 rv 与请求对象 rv 相同 = apiserver no-op
 		// （内容无变化，不产生广播事件）→ 立即清 expectations，否则 SetExpectations(1,0)
 		// 永远等不到 updateFunc 清账 → 后续 reconcile 全被拦 → 65s 空白 → 自动拉起。
@@ -1678,28 +1656,10 @@ func (c *VirtualMachineController) helperVmShutdown(vmi *v1.VirtualMachineInstan
 }
 
 func (c *VirtualMachineController) handleVMIShutdown(vmi *v1.VirtualMachineInstance, domain *api.Domain, client cmdclient.LauncherClient, timeLeft int64) error {
-	// [升级兼容] 优雅关机已完成（domain 已 shutoff 且 reason 为 shutdown）时直接返回，
-	// 不再重发关机信号，由主 reconcile 完成 Succeeded 判定与 domain 清理。
-	// 原逻辑在此场景会继续走 shutdownVMI 重发信号并依赖 gracePeriod 超时兜底；
-	// 若 virt-handler reconcile 延迟，virt-launcher 会因等不到 domain 删除通知而
-	// 超时退出（waitForFinalNotify 最长约 45s），domain 随后从缓存消失，
-	// VMI 被误判为 Failed，触发 RerunOnFailure 自动拉起。
-	if domain.Status.Status == api.Shutoff && domain.Status.Reason == api.ReasonShutdown {
-		log.Log.Object(vmi).Infof("Domain %s has already shut down gracefully, finalizing vmi", vmi.GetObjectMeta().GetName())
-		return nil
-	}
-
 	if domain.Status.Status != api.Shutdown {
 		return c.shutdownVMI(vmi, client, timeLeft)
 	}
 	log.Log.V(4).Object(vmi).Infof("%s is already shutting down.", vmi.GetObjectMeta().GetName())
-
-	// [升级兼容] 保持 requeue：domain 正在优雅关机中时，原逻辑直接返回且不再
-	// 触发任何队列重入，若 domain 关闭完成事件未被及时处理（reconcile 延迟），
-	// 后续将无人再推动该 VMI 的 Succeeded 判定与 domain 清理。
-	// 这里每 5 秒重入一次，确保 domain shutoff 后能尽快完成判定，
-	// 避免 virt-launcher 超时退出导致 VMI 被判 Failed 自动拉起。
-	c.queue.AddAfter(controller.VirtualMachineInstanceKey(vmi), time.Second*5)
 	return nil
 }
 
@@ -2417,8 +2377,6 @@ func (c *VirtualMachineController) calculateVmPhaseForStatusReason(domain *api.D
 func (c *VirtualMachineController) addDeleteFunc(obj interface{}) {
 	key, err := controller.KeyFunc(obj)
 	if err == nil {
-		// [调试日志] 定位 VMI 更新事件延迟问题：确认 add/delete 事件是否到达（临时，定位后移除）
-		log.Log.Infof("[debug] informer: vmi add/delete event for %s", key)
 		c.vmiExpectations.SetExpectations(key, 0, 0)
 		c.queue.Add(key)
 	}
@@ -2427,14 +2385,6 @@ func (c *VirtualMachineController) addDeleteFunc(obj interface{}) {
 func (c *VirtualMachineController) updateFunc(_, new interface{}) {
 	key, err := controller.KeyFunc(new)
 	if err == nil {
-		// [claude] 临时探针：事件到达时打印 rv，与 P1 的 Update 返回 rv 对照，
-		// 判断"最后到达的事件 rv"与"下一笔 Update rv"是否断裂（定位存储广播
-		// 丢弃的那笔写）。定位完成后移除。
-		if vmi, ok := new.(*v1.VirtualMachineInstance); ok {
-			log.Log.Infof("[debug] informer: vmi update event rv=%s for %s", vmi.ResourceVersion, key)
-		} else {
-			log.Log.Infof("[debug] informer: vmi update event for %s", key)
-		}
 		c.vmiExpectations.SetExpectations(key, 0, 0)
 		c.queue.Add(key)
 	}
@@ -2443,8 +2393,6 @@ func (c *VirtualMachineController) updateFunc(_, new interface{}) {
 func (c *VirtualMachineController) addDomainFunc(obj interface{}) {
 	key, err := controller.KeyFunc(obj)
 	if err == nil {
-		// [调试日志] 定位 VMI 更新事件延迟问题：domain 事件对照（临时，定位后移除）
-		log.Log.Infof("[debug] informer: domain add event for %s", key)
 		c.queue.Add(key)
 	}
 }
@@ -2465,16 +2413,12 @@ func (c *VirtualMachineController) deleteDomainFunc(obj interface{}) {
 	log.Log.V(3).Object(domain).Info("Domain deleted")
 	key, err := controller.KeyFunc(obj)
 	if err == nil {
-		// [调试日志] 定位 VMI 更新事件延迟问题：domain 事件对照（临时，定位后移除）
-		log.Log.Infof("[debug] informer: domain delete event for %s", key)
 		c.queue.Add(key)
 	}
 }
 func (c *VirtualMachineController) updateDomainFunc(_, new interface{}) {
 	key, err := controller.KeyFunc(new)
 	if err == nil {
-		// [调试日志] 定位 VMI 更新事件延迟问题：domain 事件对照（临时，定位后移除）
-		log.Log.Infof("[debug] informer: domain update event for %s", key)
 		c.queue.Add(key)
 	}
 }
