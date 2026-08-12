@@ -1121,6 +1121,15 @@ func (c *VirtualMachineController) updateVMIStatus(oldStatus *v1.VirtualMachineI
 		// [claude] 临时探针：记录 Update 成功返回的 rv，用于与 informer 事件 rv（P2）
 		// 对照，定位"哪一笔写被存储广播丢弃"（初始触发时刻）。定位完成后移除。
 		log.Log.Infof("[debug] updateVMIStatus: Update ok rv=%s key=%s", updated.ResourceVersion, key)
+		// [升级兼容] no-op 检测：Update 返回 rv 与请求对象 rv 相同 = apiserver no-op
+		// （内容无变化，不产生广播事件）→ 立即清 expectations，否则 SetExpectations(1,0)
+		// 永远等不到 updateFunc 清账 → 后续 reconcile 全被拦 → 65s 空白 → 自动拉起。
+		// （v1.2.0 竞争少、oldStatus 不过期、DeepEqual 判断准确，无此场景；v1.6.6 Stop 时
+		//   virt-controller 抢先更新 VMI 导致 oldStatus 过期、DeepEqual 误判 → no-op Update）
+		if updated.ResourceVersion == vmi.ResourceVersion {
+			c.vmiExpectations.SetExpectations(key, 0, 0)
+			log.Log.Object(vmi).Infof("VMI status update was no-op (rv unchanged %s), clearing expectations", updated.ResourceVersion)
+		}
 	}
 
 	// Record an event on the VMI when the VMI's phase changes
