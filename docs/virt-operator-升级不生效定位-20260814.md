@@ -1,8 +1,8 @@
 # virt-operator 升级不生效定位：v1.2.0 → v1.6.6 组件未跟随升级
 
-> 定位日期：2026-08-14
+> 定位日期：2026-08-14（更新：排除候选 B/C，候选 A 定为最终结论）
 > 分支：upgrade-v1.2-to-v1.6.6（基于 v1.6.6 + 自研镜像定制）
-> 状态：**结论已锁定方向，待生产环境日志/CRD 版本确认后给出代码修复**
+> 状态：**根因已定位（候选 A），待生产验证命令最终坐实后实施代码修复**
 
 ---
 
@@ -13,11 +13,14 @@
 1. 将 `kubevirt-operator.yaml` 中镜像改为 v1.6.6 并 apply → virt-operator 滚动升级完成
 2. `kubectl patch kv kubevirt -n kubevirt --type=json -p '[{ "op": "add", "path": "/spec/imageTag", "value": "v1.6.6" }]'` → **没有任何组件自动升级**
 
-补充确认的事实：
+已确认的事实：
 
 - 两个 virt-operator Pod 均已是 v1.6.6 镜像
 - 发现不升级后执行 `kubectl delete po -n kubevirt --all` 重拉全部组件 → **除 operator 外组件仍是 v1.2.0-h3**
 - fa04d0f8 已修复 snapshot/export/clone 的 v1beta1 informer 兼容问题（与本问题同类但不同范围，见 §5）
+- **候选 B（leader election 未成功）与候选 C（新 operator CrashLoop）已排除**：
+  operator 日志确认拿到了 leader 且 Pod 稳定运行（非 CrashLoop），
+  但**从未出现 "Handling KubeVirt resource" reconcile 日志**
 
 KV CR 的关键状态（诊断核心证据）：
 
@@ -30,30 +33,42 @@ KV CR 的关键状态（诊断核心证据）：
 | `status.observedKubeVirtVersion` | `v1.2.0-h3` | 已安装版本未变 |
 | `status.targetDeploymentID` == `observedDeploymentID` | `14a82789...` | operator 认为"目标 == 现状"，无升级动作 |
 | `status.targetDeploymentConfig.virtOperatorImage` | `simbaos.io/virt-operator:v1.2.0-h3` | 目标 operator 镜像仍是旧值 |
-| `status.operatorVersion` | `v0.0.0-master+$Format:%h$` | 镜像构建未注入版本 ldflags |
+| `status.operatorVersion` | `v0.0.0-master+$Format:%h$` | 镜像构建未注入版本 ldflags（见 §6.2） |
 
 ---
 
-## 1. 结论摘要
+## 1. 根因结论
 
-**新 operator（v1.6.6）从未成功跑过哪怕一次完整的 reconcile（execute）循环。**
+**virt-operator（v1.6.6）的 controller worker 因 WaitForCacheSync 被 instancetype v1beta1 informer
+卡死而从未启动，导致 execute() 一次都没有执行过。**
 
-代码级证据：`syncInstallation()` 中 target 相关字段的写入是**无条件**的：
+完整的因果链：
+
+```
+生产集群由 v1.2.0 带起 → instancetype CRD（virtualmachineclusterinstancetypes 等）只 serve v1alpha1
+→ v1.6.6 的 virt-operator 注册的 instancetype informer 硬编码 v1beta1（virtinformers.go:916-944）
+→ 对只 serve v1alpha1 的 CRD 发 v1beta1 List/Watch → 404 → reflector 失败重试
+→ 该 informer HasSynced 永假
+→ kubevirt.go:764 cache.WaitForCacheSync(stopCh, c.hasSynced) 永不返回（hasSynced 要求 26 个 informer 全部同步）
+→ runWorker 从未启动（kubevirt.go:775-790）
+→ execute() 从未执行
+→ 不读 spec.imageTag、不写 status.target*、不创建 strategy job、不 apply 新组件清单
+→ 组件永远停留在 v1.2.0-h3，重启也无用
+```
+
+### 1.1 为什么「execute() 从未执行」是铁证
+
+`syncInstallation()` 中 target 相关字段的写入是**无条件**的：
 
 - `pkg/virt-operator/kubevirt.go:1033` `util.SetOperatorVersion(kv)` → 写 `status.operatorVersion`
 - `pkg/virt-operator/kubevirt.go:1036` `config.SetTargetDeploymentConfig(kv)` → 写 `status.targetKubeVirtVersion` / `targetKubeVirtRegistry` / `targetDeploymentID` / `targetDeploymentConfig`
 - `pkg/virt-operator/util/config.go:591-598` `SetTargetDeploymentConfig` 实现
 - 目标版本来源：`pkg/virt-operator/util/config.go:218-237` `GetTargetConfigFromKV` 直接读 `kv.Spec.ImageTag`
 
-因此：只要新 operator 对 gen 4 的 KV 执行过一次 execute()，`status.target*` 必然变为 v1.6.6。
-**status 仍为 v1.2.0-h3 ⇒ execute() 从未执行 ⇒ operator 的 KV controller worker 没有启动或没有事件触发。**
+只要新 operator 对 gen 4 的 KV 执行过一次 execute()，`status.target*` 必然变为 v1.6.6。
+**status 仍为 v1.2.0-h3 ⇒ execute() 从未执行。**
 
-同理，组件重启后仍是旧镜像，是因为新 operator 从未 apply 新 install strategy
-（strategy 是组件清单的唯一来源，见 §3），而非某个 apply 环节失败。
-
----
-
-## 2. 为什么「重启组件」也没用（install strategy 机制）
+### 1.2 为什么「重启组件」也没用（install strategy 机制）
 
 virt-operator 更新组件不是直接改 Deployment 镜像，而是：
 
@@ -72,161 +87,258 @@ reconcile → loadInstallStrategy() → 找/生成 install strategy configmap �
      （`pkg/virt-operator/application.go:162` → `install.DumpInstallStrategyToConfigMap`，
       `pkg/virt-operator/resource/generate/install/strategy.go:355-385`）
 
-**陷阱 1 —— strategy job 的镜像来源**（`pkg/virt-operator/strategy_job.go:22-25`）：
+execute() 从未执行 → strategy configmap 从未刷新为 v1.6.6 清单 →
+即使组件 Pod 被删重启，Deployment/DaemonSet 的定义仍是 v1.2.0-h3 镜像 → 拉起的还是旧版本。
 
-```go
-operatorImage := config.VirtOperatorImage      // ← 运行时环境变量 VIRT_OPERATOR_IMAGE
-if operatorImage == "" {
-    operatorImage = fmt.Sprintf("%s/%s%s%s", config.GetImageRegistry(), config.GetImagePrefix(), VirtOperator, components.AddVersionSeparatorPrefix(config.GetOperatorVersion()))
-}
-```
+### 1.3 与 fa04d0f8 的关系
 
-`VIRT_OPERATOR_IMAGE` 是镜像构建时注入的环境变量。如果自研镜像的构建流程只改了
-Deployment 的 `image` 字段而没注入/更新该 env，strategy job 会用错误镜像 dump 出错误清单，
-configmap 的 DeploymentID 与目标不匹配 → job 被删除重建（`kubevirt.go:928-964` 的
-"Job failed to create install strategy" 循环）。**该循环是无限重试且每次失败都会等 job 完成，
-是「组件永不升级」的又一候选机制。**
-
-**陷阱 2 —— spec.imageTag 会绕过 shasum 校验**（`pkg/virt-operator/util/config.go:334-340`）：
-
-```go
-if tag == "" {
-    tag = tagFromOperator
-} else {
-    skipShasums = true   // spec.imageTag 非空时，跳过 shasum 环境变量
-}
-```
-
-对自研镜像（tag 里带 `-h3` 这类定制后缀）影响有限，但记录在案。
+本问题与 fa04d0f8 是**同一类问题（跳版本升级时硬编码 v1beta1 informer 在只 serve v1alpha1 的
+CRD 上 404）**，但 fa04d0f8 只覆盖了 virt-api / virt-controller / virt-exportproxy 的
+snapshot/export/clone，**没有覆盖 virt-operator 自身的 instancetype informer**（见 §5 代码位置对比）。
 
 ---
 
-## 3. execute() 为什么没跑 —— 三个候选根因（按概率排序）
+## 2. 环境变量注入镜像的机制与方法
 
-### 候选 A（最可能）：WaitForCacheSync 被 instancetype v1beta1 informer 卡死
+### 2.1 两种注入方式的区别
 
-- `pkg/virt-operator/kubevirt.go:762-766` `Run()`：
+| | 构建期注入（ldflags） | 运行期注入（Deployment env） |
+|---|---|---|
+| 注入对象 | Go 程序内的包级变量 | 容器环境变量（`os.Getenv` 读取） |
+| 机制 | `go build -ldflags "-X import.path.var=value"` 在链接期改写字符串变量 | Kubernetes 在容器启动时设置 env，由 Deployment 模板生成 |
+| 典型用途 | 版本号（gitVersion/gitCommit/buildDate） | 镜像全名（VIRT_OPERATOR_IMAGE）、shasum、目标 namespace 等 |
+| 生效时机 | 二进制编译完成后即固定 | Pod 每次创建时 |
+| 本仓库的载体 | `hack/version.sh` 的 `kubevirt::version::ldflags` | `pkg/virt-operator/resource/generate/components/deployments.go` |
 
-  ```go
-  cache.WaitForCacheSync(stopCh, c.hasSynced)
-  // Start the actual work
-  ```
+### 2.2 构建期 ldflags 注入（版本信息）
 
-  `hasSynced` 要求 **26 个 informer 全部同步**（`pkg/virt-operator/kubevirt.go:169-197`）。
+默认值在 `staging/src/kubevirt.io/client-go/version/base.go:23`：
 
-- operator 注册了 instancetype informer（`pkg/virt-operator/application.go:194-195`），
-  其实现**硬编码 v1beta1**（`pkg/controller/virtinformers.go:926-944`）：
+```go
+gitVersion = "v0.0.0-master+$Format:%h$"
+```
 
-  ```go
-  lw := cache.NewListWatchFromClient(f.clientSet.GeneratedKubeVirtClient().InstancetypeV1beta1().RESTClient(), ...)
-  ```
+生产 KV status 里 `operatorVersion: v0.0.0-master+$Format:%h$` 正是这个默认值，
+说明自研镜像构建时没有注入 `gitVersion`。
 
-  其余 instancetype informer（`VirtualMachineInstancetype` / `VirtualMachinePreference`）
-  同样硬编码 v1beta1（同文件 :916-938）。
-
-- 生产集群是从 v1.2.0 带起来的，其 instancetype CRD 可能只 serve v1alpha1。
-  对只 serve v1alpha1 的 CRD 发 v1beta1 List/Watch → 404 → reflector 失败重试 →
-  **HasSynced 永假 → WaitForCacheSync 永不返回 → execute() 永不执行**。
-  症状与观察完全吻合：无 reconcile 日志、target* 不变、组件不动。
-
-- 这与 fa04d0f8 修复的是**同一类问题**，但 fa04d0f8 只覆盖了
-  virt-api / virt-controller / virt-exportproxy 的 snapshot/export/clone，
-  **没有覆盖 virt-operator 自身的 instancetype informer**（见 §5）。
-
-- 已有的修复范式可复用：`pkg/virt-config/configuration.go:141-190`（`isSnapshotCrd` /
-  `crdServesVersion` / `crdAddedDeleted` 过滤）与 `:431-460`（`HasSnapshotAPI` 等
-  同时校验 CRD 存在 + serve 目标版本）。
-
-### 候选 B：Leader election 未成功
-
-- `pkg/virt-operator/application.go:393-414`：拿到 leader 才启动 controller
-  （`OnStartedLeading` 里 `go app.kubeVirtController.Run(...)`）。
-- 两个 operator Pod 只有一个能拿到 leader。若拿到 leader 的 Pod 恰好卡在
-  WaitForCacheSync（候选 A），或 lease 异常导致反复抢主，症状相同。
-
-### 候选 C：新 operator Pod CrashLoop 未被察觉
-
-- 启动路径有多处 `golog.Fatal`（`pkg/virt-operator/application.go:119-243`：
-  metrics / hostname / VerifyEnv / client 创建 / namespace 解析 / CRD 探测等）。
-- 观察 `kubectl get po` 时可能恰逢 Running 窗口，实际处于 CrashLoopBackOff。
-
----
-
-## 4. 待验证命令（按顺序执行，一条即可区分三个候选）
+上游注入实现（`hack/version.sh:104-131`）：
 
 ```bash
-# 1. operator 日志——区分 A/B/C 的决定性证据
-kubectl logs -n kubevirt deploy/virt-operator --tail=100 | grep -E "Started leading|Handling KubeVirt|Attempting to acquire|Operator image"
+function kubevirt::version::ldflags() {
+    kubevirt::version::get_version_vars
+    version_pkg="kubevirt.io/client-go/version"
+    local -a ldflags=($(kubevirt::version::ldflag ${version_pkg} "buildDate" "..."))
+    if [[ -n ${KUBEVIRT_GIT_COMMIT-} ]]; then
+        ldflags+=($(kubevirt::version::ldflag ${version_pkg} "gitCommit" "${KUBEVIRT_GIT_COMMIT}"))
+        ...
+    fi
+    if [[ -n ${KUBEVIRT_GIT_VERSION-} ]]; then
+        ldflags+=($(kubevirt::version::ldflag ${version_pkg} "gitVersion" "${KUBEVIRT_GIT_VERSION}"))
+    fi
+    echo "${ldflags[*]-}"
+}
+```
 
-# 2. instancetype CRD 当前 serve 的版本——验证候选 A
+构建脚本统一使用（`hack/build-go.sh:65-85`，所有 go build 目标都带
+`-ldflags "$(kubevirt::version::ldflags)"`）：
+
+```bash
+go ${target} -v -tags "${KUBEVIRT_GO_BUILD_TAGS}" \
+    -ldflags "$(kubevirt::version::ldflags)" ... ./cmd/...
+```
+
+自研构建的两种修复方法：
+
+1. **沿用上游机制**：构建时设置 `KUBEVIRT_GIT_VERSION=v1.6.6`（及
+   `KUBEVIRT_GIT_COMMIT`/`KUBEVIRT_GIT_TREE_STATE`）再执行 hack/build-go.sh；
+2. **直接手工注入**（不依赖 hack 脚本时）：
+
+   ```bash
+   go build -ldflags "-X kubevirt.io/client-go/version.gitVersion=v1.6.6 \
+                       -X kubevirt.io/client-go/version.gitCommit=$(git rev-parse --short HEAD)" \
+       ./cmd/virt-operator
+   ```
+
+   注意包路径必须是 `kubevirt.io/client-go/version`（staging 目录经
+   vendor 链接后以该 import path 参与编译，见 `pkg/virt-operator/util/client.go:35` 的 import）。
+
+### 2.3 运行期 env 注入（VIRT_OPERATOR_IMAGE 等）
+
+`VIRT_OPERATOR_IMAGE` 由组件生成器写入 operator Deployment 的容器 env
+（`pkg/virt-operator/resource/generate/components/deployments.go:604-607`）：
+
+```go
+Env: []corev1.EnvVar{
+    {
+        Name:  operatorutil.VirtOperatorImageEnvName,   // "VIRT_OPERATOR_IMAGE"
+        Value: image,                                    // 生成时的 operator 镜像全名
+    },
+    ...
+},
+```
+
+运行时读取链：
+
+```
+operator 进程启动
+→ pkg/virt-operator/util/config.go:284 GetOperatorImageWithEnvVarManager
+   （优先 VIRT_OPERATOR_IMAGE，回退废弃的 OPERATOR_IMAGE）
+→ config.go:296-349 getConfig() 用它解析 registry/prefix/tagFromOperator
+→ config.VirtOperatorImage 进入 KubeVirtDeploymentConfig
+→ strategy_job.go:22-25：strategy job 容器镜像 = config.VirtOperatorImage
+→ job --dump-install-strategy 用该镜像 dump 组件清单
+```
+
+**发布 yaml 的运维约束**（本问题直接相关）：`kubevirt-operator.yaml.in` 生成的 Deployment
+中 `spec.template.spec.containers[].image` 与 env `VIRT_OPERATOR_IMAGE` 必须**同时改**。
+只改 image 不改 env 时：operator 主进程是新镜像（RollingUpdate 生效），
+但它创建 strategy job 时用的 `VIRT_OPERATOR_IMAGE` 仍是旧镜像 → dump 出旧清单 →
+configmap DeploymentID 与目标不匹配 → 进入「Job failed to create install strategy」的
+删除-重建循环（`kubevirt.go:928-964`）→ 组件永不升级。
+
+其他同族 env（`pkg/virt-operator/util/config.go:40-81`）：
+`VIRT_API_IMAGE` / `VIRT_CONTROLLER_IMAGE` / `VIRT_HANDLER_IMAGE` / `VIRT_LAUNCHER_IMAGE` /
+`VIRT_EXPORTPROXY_IMAGE` / `VIRT_EXPORTSERVER_IMAGE` / 各 `*_SHA` shasum 变量（已弃用，
+新全镜像变量存在时忽略 shasum，`deployments.go:878-920` `generateVirtOperatorEnvVars`）。
+
+---
+
+## 3. 根因代码位置
+
+### 3.1 卡死点
+
+`pkg/virt-operator/kubevirt.go:762-766` `Run()`：
+
+```go
+// Wait for cache sync before we start the controller
+cache.WaitForCacheSync(stopCh, c.hasSynced)
+
+// Start the actual work
+for i := 0; i < threadiness; i++ {
+    go wait.Until(c.runWorker, time.Second, stopCh)
+}
+```
+
+`hasSynced` 要求 **26 个 informer 全部同步**（`pkg/virt-operator/kubevirt.go:169-197`），
+任何一个 HasSynced 永假都会让 worker 永不启动。
+
+### 3.2 出错的 informer（硬编码 v1beta1）
+
+operator 注册了 instancetype informer（`pkg/virt-operator/application.go:194-195`）：
+
+```go
+ClusterInstancetype: app.informerFactory.VirtualMachineClusterInstancetype(),
+ClusterPreference:   app.informerFactory.VirtualMachineClusterPreference(),
+```
+
+其实现硬编码 v1beta1（`pkg/controller/virtinformers.go:926-944`）：
+
+```go
+func (f *kubeInformerFactory) VirtualMachineClusterInstancetype() cache.SharedIndexInformer {
+    return f.getInformer("vmClusterInstancetypeInformer", func() cache.SharedIndexInformer {
+        lw := cache.NewListWatchFromClient(
+            f.clientSet.GeneratedKubeVirtClient().InstancetypeV1beta1().RESTClient(),  // ← 硬编码
+            instancetypeapi.ClusterPluralResourceName, k8sv1.NamespaceAll, fields.Everything())
+        return cache.NewSharedIndexInformer(lw, &instancetypev1beta1.VirtualMachineClusterInstancetype{}, ...)
+    })
+}
+```
+
+其余三个 instancetype informer 同样硬编码 v1beta1（同文件 :916-938）：
+`VirtualMachineInstancetype` / `VirtualMachinePreference` / `VirtualMachineClusterPreference`。
+
+### 3.3 为什么 List/Watch 404 会让 HasSynced 永假
+
+对只 serve v1alpha1 的 CRD 发 `.../v1beta1` 的 List/Watch，apiserver 返回 404
+（该 CRD 没有 v1beta1 serving 版本）。client-go reflector 对 404 的处理是
+**返回错误并退避重试，而不是放弃**：informers 框架中 HasSynced 只会在
+首次 List+Watch 成功后才置真。404 永不消失 → HasSynced 永假 →
+`WaitForCacheSync` 阻塞 → 无任何 reconcile 日志。这与生产观察完全吻合
+（有 "Started leading"，无 "Handling KubeVirt resource"）。
+
+---
+
+## 4. 最终验证命令（坐实根因）
+
+```bash
+# 1. instancetype CRD 当前 serve 的版本（决定性证据）
 kubectl get crd virtualmachineclusterinstancetypes.instancetype.kubevirt.io \
   -o jsonpath='{.spec.versions[*].name}'
 kubectl get crd virtualmachineclusterpreferences.instancetype.kubevirt.io \
   -o jsonpath='{.spec.versions[*].name}'
-# 期望输出包含 v1beta1；若只有 v1alpha1 → 候选 A 坐实
+# 期望：只有 v1alpha1（v1.2.0 时代 CRD）→ 根因坐实
 
-# 3. operator Pod 真实状态——验证候选 C
-kubectl get pods -n kubevirt -l kubevirt.io=virt-operator -o wide
-kubectl get pods -n kubevirt -l kubevirt.io=virt-operator \
-  -o jsonpath='{.items[*].status.containerStatuses[*].restartCount}'
+# 2. operator 日志中 reflector 失败的佐证
+kubectl logs -n kubevirt deploy/virt-operator --tail=200 | grep -iE "list.*virtualmachineclusterinstancetype|v1beta1.*not found|the server could not find"
 
-# 4. strategy job 循环证据——验证 §2 陷阱 1
-kubectl get jobs -n kubevirt -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.template.spec.containers[*].image}{"\n"}{end}'
-kubectl get cm -n kubevirt | grep strategy
-
-# 5. strategy configmap 的 DeploymentID 与 KV status 是否一致
-kubectl get kv kubevirt -n kubevirt -o jsonpath='{.status.targetDeploymentID}'
-kubectl get cm -n kubevirt -l operator.kubevirt.io -o jsonpath='{range .items[*]}{.metadata.annotations}{"\n"}{end}' | grep -o 'operator.kubevirt.io/install-strategy-identifier[^,]*'
+# 3. 确认 reconcile 从未发生
+kubectl logs -n kubevirt deploy/virt-operator --tail=500 | grep -c "Handling KubeVirt resource"
+# 期望：0
 ```
-
-判读表：
-
-| 日志特征 | 结论 |
-|---|---|
-| 无 "Started leading" | 候选 B（leader election） |
-| 有 "Started leading"，无 "Handling KubeVirt resource" | 候选 A（WaitForCacheSync 卡死） |
-| 日志含 fatal/panic 且重启计数高 | 候选 C（CrashLoop） |
-| 有 "Handling KubeVirt resource" 但反复出现 "Created job" / "Job failed" | §2 陷阱 1（strategy job 镜像错误循环） |
 
 ---
 
-## 5. fa04d0f8 与本问题的关系
+## 5. fa04d0f8 与本问题的关系（代码位置对比）
 
 fa04d0f8「跳版本升级时 snapshot/export/clone v1beta1 informer 条件创建」修复范围：
 
-- `pkg/virt-config/configuration.go`：`HasSnapshotAPI` / `HasExportAPI` / `HasCloneAPI`
-  改为同时校验 CRD 存在且 serve v1beta1；`crdAddedDeleted` 过滤中加入 snapshot/export/clone
-- `pkg/virt-api/api.go`：vmRestoreInformer 条件创建
-- `pkg/virt-controller/watch/application.go`、`pkg/virt-exportproxy`：同类条件创建
+- `pkg/virt-config/configuration.go:141-190`：`isSnapshotCrd` / `isExportCrd` / `isCloneCrd` /
+  `crdServesVersion`（:159-165 检查 `v.Name == version && v.Served`）/
+  `crdAddedDeleted` 过滤（:168-190）
+- `pkg/virt-config/configuration.go:431-460`：`HasSnapshotAPI` / `HasExportAPI` / `HasCloneAPI`
+  同时校验 CRD 存在 + serve v1beta1
+- `pkg/controller/virtinformers.go:699-914`：snapshot/export/clone/CDI 的条件创建模式，
+  不支持时退回 dummy informer（`testutils.NewFakeInformerFor`）
+- `pkg/virt-api/api.go`、`pkg/virt-controller/watch/application.go`、virt-exportproxy：条件创建接线
 
-**未覆盖**：`pkg/controller/virtinformers.go` 中 instancetype 系列 informer 的硬编码 v1beta1
-（:916-944），以及 virt-operator 对它们的注册（`pkg/virt-operator/application.go:194-195`）。
-virt-operator 的 hasSynced 依赖这些 informer，卡死位置在 `pkg/virt-operator/kubevirt.go:764`。
+**未覆盖（本问题的根因）**：`pkg/controller/virtinformers.go:916-944` 的 instancetype
+系列 informer 硬编码 v1beta1，以及 virt-operator 对它们的注册
+（`pkg/virt-operator/application.go:194-195`）。virt-operator 的 hasSynced 依赖这些
+informer，卡死位置在 `pkg/virt-operator/kubevirt.go:764`。
 
 ---
 
-## 6. 后续修复计划（待验证确认后执行）
+## 6. 后续修复计划
 
-1. **（若候选 A 坐实）instancetype informer 版本自适应**：
-   - 参照 `pkg/virt-config/configuration.go` 的 CRD 探测模式，在
-     `pkg/controller/virtinformers.go:916-944` 按 CRD serve 版本选择
-     v1beta1 / v1alpha1，不服务时退回 dummy informer（`testutils.NewFakeInformerFor`
-     模式，见 fa04d0f8 的 virtinformers.go 改动）
-   - 或先 apply v1.6.6 的 instancetype CRD 清单让 CRD serve v1beta1，再重启 operator
-     （最干净的运维路径）
-2. **构建流程补版本注入**：`status.operatorVersion` 为
-   `v0.0.0-master+$Format:%h$`，说明镜像构建未注入 ldflags
-   （默认值在 `staging/src/kubevirt.io/client-go/version/base.go:23`）。
-   构建时加 `-ldflags "-X kubevirt.io/client-go/version.gitVersion=v1.6.6"`，
-   否则 operatorVersion 永远显示占位符，干扰升级判断。
-3. **验证 strategy job 镜像**：确认自研镜像构建流程是否同步注入
-   `VIRT_OPERATOR_IMAGE`（`pkg/virt-operator/util/config.go:48`），
-   否则 strategy job 会用错误镜像（§2 陷阱 1）。
-4. **升级动作修正**：跨主版本跳升（1.2.0→1.6.6）建议直接替换 operator Deployment
-   （delete 后 apply 新 yaml），并在新 operator 确认 reconcile 后再 patch KV；
-   避免依赖 12-24h 的 informer resync
-   （`pkg/controller/virtinformers.go:1142-1147` 的 `ResyncPeriod(12 * time.Hour)`）
-   来触发。patch imageTag 仅在 operator 正常 reconcile 的前提下才有效。
+### 6.1 instancetype informer 版本自适应（核心修复）
+
+参照 fa04d0f8 的 CRD 探测 + dummy informer 模式，改 `pkg/controller/virtinformers.go:916-944`：
+
+1. 在 `pkg/virt-config/configuration.go` 增加 `HasInstancetypeAPI()`（CRD 存在且 serve
+   v1beta1 才返回 true），并把 `isInstancetypeCrd` 加入 `crdAddedDeleted` 过滤
+   （:168-190），使 CRD 出现/消失时触发回调重新初始化（模式同 snapshot/export/clone）；
+2. `kubeInformerFactory` 持有 clusterConfig 引用（或通过回调），在四个 instancetype
+   informer 的构造处按 `HasInstancetypeAPI()` 分支：
+   - serve v1beta1 → 现有 v1beta1 ListWatch（保持现状）
+   - 否则 → dummy informer：
+     ```go
+     informer, _ := testutils.NewFakeInformerFor(&instancetypev1beta1.VirtualMachineClusterInstancetype{})
+     return informer
+     ```
+     （dummy 模式参考 `DummyOperatorSCC`，`pkg/controller/virtinformers.go:1220-1225`
+     附近同文件既有实现：`testutils.NewFakeInformerFor(&secv1.SecurityContextConstraints{})`）
+3. 确保 virt-operator 的 `hasSynced`（`kubevirt.go:169-197`）不受影响——dummy informer
+   的 HasSynced 立即为真，operator 得以正常启动 reconcile。
+
+### 6.2 构建流程补版本 ldflags 注入
+
+`status.operatorVersion` 为 `v0.0.0-master+$Format:%h$`，说明自研镜像构建未注入
+`gitVersion`。按 §2.2 修复（设置 `KUBEVIRT_GIT_VERSION` 或手工 `-X` 注入），
+否则 operatorVersion 永远显示占位符，干扰升级判断与排障。
+
+### 6.3 发布 yaml 的 image 与 VIRT_OPERATOR_IMAGE 一致性
+
+自研镜像发布流程需保证 `kubevirt-operator.yaml` 中 Deployment 的 image 字段与
+env `VIRT_OPERATOR_IMAGE` 同步更新（§2.3），否则 strategy job 用错误镜像
+dump 出旧清单，陷入「Job failed → 删除 → 重建」循环（`kubevirt.go:928-964`）。
+
+### 6.4 运维路径（修复发布前的临时绕过）
+
+在代码修复发布前，生产可先 apply v1.6.6 的 instancetype CRD 清单使 CRD serve
+v1beta1，然后重启 virt-operator Pod——WaitForCacheSync 即可通过，operator
+开始正常 reconcile（读 spec.imageTag → 创建 strategy job → apply 新组件清单 →
+组件滚动升级）。注意：跨主版本跳升（1.2.0→1.6.6）后建议检查 strategy job 镜像
+与 KV status 的 DeploymentID 匹配（见 §4 命令），确认后再观察组件滚动升级。
 
 ---
 
@@ -236,20 +348,22 @@ virt-operator 的 hasSynced 依赖这些 informer，卡死位置在 `pkg/virt-op
 |---|---|
 | execute() 入口 / 状态更新 | `pkg/virt-operator/kubevirt.go:798-887` |
 | target* 无条件写入 | `pkg/virt-operator/kubevirt.go:1033-1036` + `pkg/virt-operator/util/config.go:591-598` |
-| 目标版本来源（spec.imageTag） | `pkg/virt-operator/util/config.go:218-237`（`:234` 读 ImageTag） |
+| 目标版本来源（spec.imageTag） | `pkg/virt-operator/util/config.go:218-237`（:234 读 ImageTag） |
 | imageTag 非空跳过 shasum | `pkg/virt-operator/util/config.go:334-340` |
-| WaitForCacheSync 阻塞点 | `pkg/virt-operator/kubevirt.go:762-766` |
+| **根因卡死点：WaitForCacheSync** | `pkg/virt-operator/kubevirt.go:762-766` |
 | hasSynced 26 个 informer 清单 | `pkg/virt-operator/kubevirt.go:169-197` |
-| instancetype informer 硬编码 v1beta1 | `pkg/controller/virtinformers.go:916-944` |
+| **根因：instancetype informer 硬编码 v1beta1** | `pkg/controller/virtinformers.go:916-944` |
 | operator 注册 instancetype informer | `pkg/virt-operator/application.go:194-195` |
 | loadInstallStrategy 三级查找 | `pkg/virt-operator/kubevirt.go:889-984` |
 | strategy 缓存 key（DeploymentID+generation） | `pkg/virt-operator/strategy.go:15-34` |
-| strategy job 镜像来源 | `pkg/virt-operator/strategy_job.go:22-25` |
+| strategy job 镜像来源（VIRT_OPERATOR_IMAGE） | `pkg/virt-operator/strategy_job.go:22-25` |
+| operator Deployment env 生成（VIRT_OPERATOR_IMAGE） | `pkg/virt-operator/resource/generate/components/deployments.go:604-607` |
 | strategy configmap 匹配条件 | `pkg/virt-operator/resource/generate/install/strategy.go:664-688` |
 | DeploymentID 计算（sha1 over 全字段） | `pkg/virt-operator/util/config.go:724-772` |
 | job 失败 → 删除重建循环 | `pkg/virt-operator/kubevirt.go:928-964` |
 | leader election 启动 controller | `pkg/virt-operator/application.go:393-414` |
-| 启动路径 golog.Fatal 点 | `pkg/virt-operator/application.go:119-243` |
 | operatorVersion 占位符来源 | `staging/src/kubevirt.io/client-go/version/base.go:23` |
-| informer resync 12-24h | `pkg/controller/virtinformers.go:1142-1147` |
+| 版本 ldflags 注入函数 | `hack/version.sh:104-131`（构建脚本 `hack/build-go.sh:65-85`） |
+| env 常量与 GetOperatorImage 读取 | `pkg/virt-operator/util/config.go:40-81, 284-296` |
+| dummy informer 模式（修复参考） | `pkg/controller/virtinformers.go:1220-1225`（`DummyOperatorSCC`） |
 | fa04d0f8 的 CRD 版本探测范式（复用参考） | `pkg/virt-config/configuration.go:141-190, 431-460` |
