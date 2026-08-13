@@ -138,6 +138,33 @@ gitVersion = "v0.0.0-master+$Format:%h$"
 `KUBEVIRT_GIT_VERSION`。想让 operatorVersion 精确显示 `v1.6.6`，显式设置
 `KUBEVIRT_GIT_VERSION=v1.6.6` 是唯一可靠做法。
 
+**v1.2.0 与 v1.6.6 的机制完全一致，无差异**（逐文件 diff 验证）：
+
+- `hack/version.sh` 两版本完全相同（含 `get_version_vars` 的 tag 推导与 semver 校验）
+- `hack/build-go.sh` 的 `-ldflags "$(kubevirt::version::ldflags)"` 挂载方式相同
+- `staging/src/kubevirt.io/client-go/version/base.go:23` 占位符相同
+- Bazel stamp 链路相同：`.bazelrc:6` `--stamp --workspace_status_command=./hack/print-workspace-status.sh`
+  → `print-workspace-status.sh:43` 输出 `gitVersion ${KUBEVIRT_GIT_VERSION-}`
+  → `cmd/virt-operator/BUILD.bazel:23` `x_defs = version_x_defs()`
+
+**「构建目录有 tag 但未注入」的四个原因**：
+
+1. **`hack/dockerized` 会排除 `.git`**（:180 `--exclude ".git"`）：上游构建容器内
+   没有 git 仓库/tag → `git describe` 失败 → `KUBEVIRT_GIT_VERSION` 为空 →
+   `-X gitVersion` 整段跳过（`version.sh:119-121`）。只有官方发布流程
+   （`git archive` + `$Format:%D$` 魔数，`version.sh:39-46`）或显式设
+   `KUBEVIRT_GIT_VERSION` 才能拿到值；
+2. **tag 匹配规则**：`git describe --match='v[0-9]*'`（`version.sh:57`）只认
+   `v`+数字开头的可达 tag；
+3. **`DOCKER_TAG` 与 ldflags 是两条独立链路**：`hack/config-default.sh:29`
+   `docker_tag=${DOCKER_TAG:-latest}` 只决定镜像 tag 后缀（自研的 `-h3` 即来源于此），
+   不参与 `version_x_defs` 的 stamp；
+4. **bazel 镜像构建不依赖版本 stamp**：`hack/bazel-build-images.sh` 注释明确
+   "vars are uninteresting for the build step"——镜像内二进制带占位符是默认行为。
+
+**结论**：版本注入是官方发布流程专属动作，任何自研构建（无论 1.2.0 还是 1.6.6）
+都必须显式设置 `KUBEVIRT_GIT_VERSION`。
+
 上游注入实现（`hack/version.sh:104-131`）：
 
 ```bash
