@@ -121,6 +121,23 @@ gitVersion = "v0.0.0-master+$Format:%h$"
 生产 KV status 里 `operatorVersion: v0.0.0-master+$Format:%h$` 正是这个默认值，
 说明自研镜像构建时没有注入 `gitVersion`。
 
+**上游的「默认注入」机制**：`hack/build-go.sh:65-85` 的所有构建目标都带
+`-ldflags "$(kubevirt::version::ldflags)"`，其中 gitVersion 的值按以下优先级决定
+（`hack/version.sh:47-92` `get_version_vars()`）：
+
+1. 显式环境变量 `KUBEVIRT_GIT_VERSION`（上游发布流程的正式途径）；
+2. 否则用 `git describe --match='v[0-9]*' --tags --abbrev=14` 从 git tag 自动推导
+   （tag 距离以 `+N+hash` 形式编入 semver，脏树追加 `-dirty`）；
+3. 两条路都走不通（构建目录是 `git archive` 导出且无 tag、或根本不是 git 仓库）时
+   `KUBEVIRT_GIT_VERSION` 为空 → `ldflags()` 中对应 `-X ...gitVersion=...` 整段跳过
+   （`hack/version.sh:119-121`）→ 二进制保留 `base.go` 占位符。
+
+另外 `version.sh:40-44` 会校验推导结果是否符合 semver，不符合则**拒绝构建**。
+
+自研镜像出现占位符 ⇒ 构建流程没有经过带 tag 的 git 目录且未显式设置
+`KUBEVIRT_GIT_VERSION`。想让 operatorVersion 精确显示 `v1.6.6`，显式设置
+`KUBEVIRT_GIT_VERSION=v1.6.6` 是唯一可靠做法。
+
 上游注入实现（`hack/version.sh:104-131`）：
 
 ```bash
@@ -161,6 +178,38 @@ go ${target} -v -tags "${KUBEVIRT_GO_BUILD_TAGS}" \
 
    注意包路径必须是 `kubevirt.io/client-go/version`（staging 目录经
    vendor 链接后以该 import path 参与编译，见 `pkg/virt-operator/util/client.go:35` 的 import）。
+
+### 2.2.1 如何验证注入是否成功
+
+**端到端验证（最方便）**——`status.operatorVersion` 就是干这个用的：
+
+```bash
+kubectl get kv kubevirt -n kubevirt -o jsonpath='{.status.operatorVersion}'
+```
+
+它由运行中的 operator 每次 reconcile 通过 `version.Get().String()` 写入
+（`pkg/virt-operator/kubevirt.go:1033`）。显示 `v1.6.6` 而非
+`v0.0.0-master+$Format:%h$` ⇒ 注入成功**且** operator 在正常 reconcile
+（因此这也是验证候选 A 修复成效的指标之一）。
+
+**本地二进制验证（构建后立刻查，无需运行）**——`go version -m` 读嵌入的
+build 信息，ldflags 注入的所有变量都在 `-build settings` 里：
+
+```bash
+go version -m ./_out/cmd/virt-operator/virt-operator
+# 关键行：
+#   build -ldflags=" -X kubevirt.io/client-go/version.gitVersion=v1.6.6 ..."
+#   build vcs.revision=6cdc33d7832493
+```
+
+镜像里同样适用（先拉镜像或直接在 Pod 内执行，路径按实际镜像 layout）：
+
+```bash
+kubectl exec -n kubevirt deploy/virt-operator -- go version -m /usr/bin/virt-operator
+```
+
+**不要用**：operator 启动日志里的 `Operator image: ...`——它来自运行时环境变量
+`VIRT_OPERATOR_IMAGE`，反映不了 ldflags 注入结果。
 
 ### 2.3 运行期 env 注入（VIRT_OPERATOR_IMAGE 等）
 
