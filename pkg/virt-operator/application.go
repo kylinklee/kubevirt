@@ -100,6 +100,9 @@ type VirtOperatorApp struct {
 	clusterConfig *virtconfig.ClusterConfig
 	host          string
 
+	// [升级兼容] instancetype CRD 是否 serve v1beta1（跳版本升级中间态可能为 false）
+	hasInstancetypeAPI bool
+
 	ctx context.Context
 
 	reInitChan chan string
@@ -168,6 +171,11 @@ func Execute() {
 
 	app.config = util.OperatorConfig{}
 
+	// [升级兼容] 跳版本升级中间态 instancetype CRD 可能不存在或未 serve v1beta1，
+	// 此时 v1beta1 informer 的 ListWatch 会 404 导致 reflector 卡死（日志风暴）。
+	// 参照 ServiceMonitor 的 discovery 探测模式，不可用时退回 dummy informer。
+	app.hasInstancetypeAPI = app.detectInstancetypeV1beta1()
+
 	app.informerFactory = controller.NewKubeInformerFactory(app.restClient, app.clientSet, app.aggregatorClient, app.operatorNamespace)
 	app.informers = util.Informers{
 		KubeVirt:                 app.informerFactory.KubeVirt(),
@@ -191,8 +199,8 @@ func Execute() {
 		Namespace:                app.informerFactory.Namespace(),
 		Secrets:                  app.informerFactory.Secrets(),
 		ConfigMap:                app.informerFactory.OperatorConfigMap(),
-		ClusterInstancetype:      app.informerFactory.VirtualMachineClusterInstancetype(),
-		ClusterPreference:        app.informerFactory.VirtualMachineClusterPreference(),
+		ClusterInstancetype:      app.clusterInstancetypeInformer(),
+		ClusterPreference:        app.clusterPreferenceInformer(),
 		Leases:                   app.informerFactory.Leases(),
 	}
 
@@ -495,4 +503,41 @@ func (app *VirtOperatorApp) shouldChangeLogVerbosity() {
 func (app *VirtOperatorApp) shouldUpdateConfigurationMetrics() {
 	emulationEnabled := app.clusterConfig.GetDeveloperConfigurationUseEmulation()
 	metrics.SetEmulationEnabledMetric(emulationEnabled)
+}
+
+// [升级兼容] 通过 discovery 检查 instancetype.kubevirt.io CRD 是否 serve v1beta1。
+// 跳版本升级（v1.2.0→v1.6.6）中间态下该 CRD 可能不存在或只 serve 旧版本，
+// 此时硬编码 v1beta1 的 informer 其 ListWatch 会 404，reflector 卡在重试退避中。
+// 探测失败一律视为不可用（返回 false 走 dummy informer，比 404 风暴安全）。
+func (app *VirtOperatorApp) detectInstancetypeV1beta1() bool {
+	resourceLists, err := app.clientSet.DiscoveryClient().ServerResourcesForGroupVersion("instancetype.kubevirt.io/v1beta1")
+	if err != nil {
+		return false
+	}
+	for _, resource := range resourceLists.APIResources {
+		if resource.Name == "virtualmachineclusterinstancetypes" {
+			return true
+		}
+	}
+	return false
+}
+
+// [升级兼容] instancetype CRD 可用时返回真实 informer，否则返回 dummy informer。
+// dummy informer 的 HasSynced 立即为真，不影响 virt-operator 启动与 reconcile；
+// 升级完成后 CRD 升级到 v1beta1，virt-operator 重启时自动切换到真实 informer。
+func (app *VirtOperatorApp) clusterInstancetypeInformer() cache.SharedIndexInformer {
+	if !app.hasInstancetypeAPI {
+		log.Log.Info("Instancetype v1beta1 API not detected, using dummy cluster instancetype informer")
+		return app.informerFactory.DummyVirtualMachineClusterInstancetype()
+	}
+	return app.informerFactory.VirtualMachineClusterInstancetype()
+}
+
+// [升级兼容] 同上：cluster preference informer 的条件创建
+func (app *VirtOperatorApp) clusterPreferenceInformer() cache.SharedIndexInformer {
+	if !app.hasInstancetypeAPI {
+		log.Log.Info("Instancetype v1beta1 API not detected, using dummy cluster preference informer")
+		return app.informerFactory.DummyVirtualMachineClusterPreference()
+	}
+	return app.informerFactory.VirtualMachineClusterPreference()
 }

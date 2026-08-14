@@ -249,6 +249,8 @@ type VirtControllerApp struct {
 	hasSnapshotAPI bool
 	hasExportAPI   bool
 	hasCloneAPI    bool
+	// [升级兼容] instancetype CRD 是否 serve v1beta1（跳版本升级中间态可能为 false）
+	hasInstancetypeAPI bool
 	// the channel used to trigger re-initialization.
 	reInitChan chan string
 
@@ -474,10 +476,23 @@ func Execute() {
 		log.Log.Infof("Clone API not detected, using dummy VirtualMachineClone informer")
 	}
 
-	app.instancetypeInformer = app.informerFactory.VirtualMachineInstancetype()
-	app.clusterInstancetypeInformer = app.informerFactory.VirtualMachineClusterInstancetype()
-	app.preferenceInformer = app.informerFactory.VirtualMachinePreference()
-	app.clusterPreferenceInformer = app.informerFactory.VirtualMachineClusterPreference()
+	// [升级兼容] 跳版本升级中间态 instancetype CRD 可能不存在或只 serve v1alpha1，
+	// 此时 v1beta1 informer 的 ListWatch 会 404 导致 reflector 卡死（日志风暴）。
+	// 与 snapshot/export/clone 一致：不可用时退回 dummy informer（HasSynced
+	// 立即为真，不影响控制器启动），升级完成后通过 reinit 自动切换真实 informer。
+	app.hasInstancetypeAPI = app.clusterConfig.HasInstancetypeAPI()
+	if app.hasInstancetypeAPI {
+		app.instancetypeInformer = app.informerFactory.VirtualMachineInstancetype()
+		app.clusterInstancetypeInformer = app.informerFactory.VirtualMachineClusterInstancetype()
+		app.preferenceInformer = app.informerFactory.VirtualMachinePreference()
+		app.clusterPreferenceInformer = app.informerFactory.VirtualMachineClusterPreference()
+	} else {
+		app.instancetypeInformer = app.informerFactory.DummyVirtualMachineInstancetype()
+		app.clusterInstancetypeInformer = app.informerFactory.DummyVirtualMachineClusterInstancetype()
+		app.preferenceInformer = app.informerFactory.DummyVirtualMachinePreference()
+		app.clusterPreferenceInformer = app.informerFactory.DummyVirtualMachineClusterPreference()
+		log.Log.Infof("Instancetype API not detected, using dummy instancetype/preference informers")
+	}
 
 	app.onOpenshift = onOpenShift
 
@@ -555,6 +570,13 @@ func (vca *VirtControllerApp) configModificationCallback() {
 	if newHasSnapshotAPI != vca.hasSnapshotAPI || newHasExportAPI != vca.hasExportAPI || newHasCloneAPI != vca.hasCloneAPI {
 		log.Log.Infof("Reinitialize virt-controller, snapshot/export/clone CRD availability changed (snapshot:%t export:%t clone:%t)",
 			newHasSnapshotAPI, newHasExportAPI, newHasCloneAPI)
+		vca.reInitChan <- "reinit"
+		return
+	}
+	// [升级兼容] instancetype CRD 出现/升级到 v1beta1 时同样需要切换真实 informer
+	newHasInstancetypeAPI := vca.clusterConfig.HasInstancetypeAPI()
+	if newHasInstancetypeAPI != vca.hasInstancetypeAPI {
+		log.Log.Infof("Reinitialize virt-controller, instancetype CRD availability changed (instancetype:%t)", newHasInstancetypeAPI)
 		vca.reInitChan <- "reinit"
 		return
 	}

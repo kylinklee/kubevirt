@@ -160,6 +160,19 @@ type KubeInformerFactory interface {
 	// Watches VirtualMachineClusterPreference objects
 	VirtualMachineClusterPreference() cache.SharedIndexInformer
 
+	// [升级兼容] instancetype CRD 未 serve v1beta1 时的 dummy informer
+	// （跳版本升级中间态下真实 informer 的 ListWatch 会 404 导致 reflector 卡死）
+	DummyVirtualMachineInstancetype() cache.SharedIndexInformer
+
+	// [升级兼容] instancetype CRD 未 serve v1beta1 时的 dummy informer
+	DummyVirtualMachineClusterInstancetype() cache.SharedIndexInformer
+
+	// [升级兼容] instancetype CRD 未 serve v1beta1 时的 dummy informer
+	DummyVirtualMachinePreference() cache.SharedIndexInformer
+
+	// [升级兼容] instancetype CRD 未 serve v1beta1 时的 dummy informer
+	DummyVirtualMachineClusterPreference() cache.SharedIndexInformer
+
 	// Watches for k8s extensions api configmap
 	ApiAuthConfigMap() cache.SharedIndexInformer
 
@@ -941,6 +954,38 @@ func (f *kubeInformerFactory) VirtualMachineClusterPreference() cache.SharedInde
 	return f.getInformer("vmClusterPreferenceInformer", func() cache.SharedIndexInformer {
 		lw := cache.NewListWatchFromClient(f.clientSet.GeneratedKubeVirtClient().InstancetypeV1beta1().RESTClient(), instancetypeapi.ClusterPluralPreferenceResourceName, k8sv1.NamespaceAll, fields.Everything())
 		return cache.NewSharedIndexInformer(lw, &instancetypev1beta1.VirtualMachineClusterPreference{}, f.defaultResync, cache.Indexers{})
+	})
+}
+
+// [升级兼容] 当 instancetype CRD 未 serve v1beta1 时使用的 dummy informer
+func (f *kubeInformerFactory) DummyVirtualMachineInstancetype() cache.SharedIndexInformer {
+	return f.getInformer("fakeVmInstancetypeInformer", func() cache.SharedIndexInformer {
+		informer, _ := testutils.NewFakeInformerFor(&instancetypev1beta1.VirtualMachineInstancetype{})
+		return informer
+	})
+}
+
+// [升级兼容] 当 instancetype CRD 未 serve v1beta1 时使用的 dummy informer
+func (f *kubeInformerFactory) DummyVirtualMachineClusterInstancetype() cache.SharedIndexInformer {
+	return f.getInformer("fakeVmClusterInstancetypeInformer", func() cache.SharedIndexInformer {
+		informer, _ := testutils.NewFakeInformerFor(&instancetypev1beta1.VirtualMachineClusterInstancetype{})
+		return informer
+	})
+}
+
+// [升级兼容] 当 instancetype CRD 未 serve v1beta1 时使用的 dummy informer
+func (f *kubeInformerFactory) DummyVirtualMachinePreference() cache.SharedIndexInformer {
+	return f.getInformer("fakeVmPreferenceInformer", func() cache.SharedIndexInformer {
+		informer, _ := testutils.NewFakeInformerFor(&instancetypev1beta1.VirtualMachinePreference{})
+		return informer
+	})
+}
+
+// [升级兼容] 当 instancetype CRD 未 serve v1beta1 时使用的 dummy informer
+func (f *kubeInformerFactory) DummyVirtualMachineClusterPreference() cache.SharedIndexInformer {
+	return f.getInformer("fakeVmClusterPreferenceInformer", func() cache.SharedIndexInformer {
+		informer, _ := testutils.NewFakeInformerFor(&instancetypev1beta1.VirtualMachineClusterPreference{})
+		return informer
 	})
 }
 

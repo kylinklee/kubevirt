@@ -34,6 +34,7 @@ import (
 	clonev1 "kubevirt.io/api/clone/v1beta1"
 	v1 "kubevirt.io/api/core/v1"
 	exportv1 "kubevirt.io/api/export/v1beta1"
+	instancetypev1 "kubevirt.io/api/instancetype/v1beta1"
 	snapshotv1 "kubevirt.io/api/snapshot/v1beta1"
 	"kubevirt.io/client-go/log"
 
@@ -152,6 +153,11 @@ func isCloneCrd(crd *extv1.CustomResourceDefinition) bool {
 	return crd.Spec.Group == "clone.kubevirt.io"
 }
 
+// [升级兼容] 判断 CRD 是否属于 instancetype.kubevirt.io 组
+func isInstancetypeCrd(crd *extv1.CustomResourceDefinition) bool {
+	return crd.Spec.Group == "instancetype.kubevirt.io"
+}
+
 // [升级兼容] 判断 CRD 是否 served 指定版本
 // v1.2.0 集群中 snapshot/export/clone CRD 只 serve v1alpha1，
 // 而 v1.6.6 的 informer 使用 v1beta1 REST client。跳版本升级时
@@ -172,7 +178,9 @@ func (c *ClusterConfig) crdAddedDeleted(obj interface{}) {
 		!isServiceMonitor(crd) && !isPrometheusRules(crd) &&
 		// [升级兼容] 跳版本升级时 snapshot/export/clone CRD 的出现/消失
 		// 需要触发 virt-controller/virt-api 重新初始化以切换真实 informer
-		!isSnapshotCrd(crd) && !isExportCrd(crd) && !isCloneCrd(crd) {
+		!isSnapshotCrd(crd) && !isExportCrd(crd) && !isCloneCrd(crd) &&
+		// [升级兼容] instancetype CRD 同样影响 instancetype informer 的真实/dummy 切换
+		!isInstancetypeCrd(crd) {
 		return
 	}
 
@@ -468,6 +476,25 @@ func (c *ClusterConfig) HasCloneAPI() bool {
 	for _, obj := range objects {
 		if crd, ok := obj.(*extv1.CustomResourceDefinition); ok && crd.DeletionTimestamp == nil {
 			if isCloneCrd(crd) && crdServesVersion(crd, clonev1.SchemeGroupVersion.Version) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// [升级兼容] 检查 instancetype.kubevirt.io CRD 是否存在且 serve v1beta1。
+// 跳版本升级（v1.2.0→v1.6.6）中间态下该 CRD 可能不存在或只 serve v1alpha1，
+// 此时硬编码 v1beta1 的 informer 其 ListWatch 会 404，reflector 卡在重试退避中。
+// virt-controller 据此决定 instancetype informer 使用真实实现还是 dummy 实现。
+func (c *ClusterConfig) HasInstancetypeAPI() bool {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	objects := c.crdStore.List()
+	for _, obj := range objects {
+		if crd, ok := obj.(*extv1.CustomResourceDefinition); ok && crd.DeletionTimestamp == nil {
+			if isInstancetypeCrd(crd) && crdServesVersion(crd, instancetypev1.SchemeGroupVersion.Version) {
 				return true
 			}
 		}
