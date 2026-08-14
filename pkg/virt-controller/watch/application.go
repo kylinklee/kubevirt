@@ -356,9 +356,6 @@ func Execute() {
 	app.reInitChan = make(chan string, 10)
 	app.hasCDI = app.clusterConfig.HasDataVolumeAPI()
 	app.isDRAEnabled = app.clusterConfig.GPUsWithDRAGateEnabled() || app.clusterConfig.HostDevicesWithDRAEnabled()
-	app.clusterConfig.SetConfigModifiedCallback(app.configModificationCallback)
-	app.clusterConfig.SetConfigModifiedCallback(app.shouldChangeLogVerbosity)
-	app.clusterConfig.SetConfigModifiedCallback(app.shouldChangeRateLimiter)
 
 	webService := new(restful.WebService)
 	webService.Path("/").Consumes(restful.MIME_JSON).Produces(restful.MIME_JSON)
@@ -493,6 +490,18 @@ func Execute() {
 		app.clusterPreferenceInformer = app.informerFactory.DummyVirtualMachineClusterPreference()
 		log.Log.Infof("Instancetype API not detected, using dummy instancetype/preference informers")
 	}
+
+	// [升级兼容] configModifiedCallback 注册必须放在所有 hasXxxAPI 字段初始化之后。
+	// SetConfigModifiedCallback 注册时会立即触发一次所有已注册 callback
+	// （configuration.go:331），而 configModificationCallback 里会对比
+	// HasSnapshotAPI()/HasInstancetypeAPI() 等实时值与字段快照；若字段尚未
+	// 初始化（零值 false）而 CRD 已 serve v1beta1（true），会误判"CRD 可用性
+	// 变化"触发 reinit，导致 virt-controller 无限重启（Completed/CrashLoop 交替）。
+	// 上游只有 cdi/DRA 检测（字段初始化在注册之前，无此问题）；
+	// snapshot/export/clone（fa04d0f8）与 instancetype 检测引入后必须调整顺序。
+	app.clusterConfig.SetConfigModifiedCallback(app.configModificationCallback)
+	app.clusterConfig.SetConfigModifiedCallback(app.shouldChangeLogVerbosity)
+	app.clusterConfig.SetConfigModifiedCallback(app.shouldChangeRateLimiter)
 
 	app.onOpenshift = onOpenShift
 
