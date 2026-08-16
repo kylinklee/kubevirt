@@ -1,4 +1,4 @@
-# KubeVirt 1.6.6 → 1.2.0 降级适配分析（2026-08-16 代码级最终版）
+# KubeVirt 1.6.6 → 1.2.0 降级适配分析（2026-08-17 二次修正版）
 
 > 本文档是 KubeVirt 降级（v1.6.6 → v1.2.0）的适配分析快照，结论基于 `v1.2.0`（commit `b2af7b619c`）与 `v1.6.6`（commit `51395ba146`）两个 tag 的源码逐行对比。
 >
@@ -13,7 +13,7 @@
 | 1 | 1.6.6 是否新增了 CRD kind | **没有**。1.2.0 与 1.6.6 的 CRD 工厂列表完全相同（16 个）。 | 无需备份/删除任何"新增 CRD" |
 | 2 | 那真正变化的 CRD 是什么 | **已存在 CRD 的 storage 版本变化**：5 个 CRD 从 `v1alpha1` 切到 `v1beta1`（snapshot 系 3 个 + export + clone）。 | 见 §2 |
 | 3 | snapshot/export/clone 的 CR 实例会被自动创建吗 | **不会**。CRD 由 operator 自动创建；CR 实例只由用户/client 创建。生产无 CR 数据 → 可直接删 CRD 重建。 | 见 §3 |
-| 4 | 降级时 virt-launcher 为何自动重启（升级不重启） | **1.2.0 virt-handler 无法管理 1.6.6 拉起的 launcher**，VMI 被判 Failed，VM controller（runStrategy:Always）重启到 1.2.0 镜像。**与 workloadUpdateMethods 无关**。 | 见 §4 |
+| 4 | 降级时 virt-launcher 为何自动重启（升级不重启） | **1.2.0 handler 把「Running VMI + domain 瞬态缺失」硬编码判 Failed**，VM controller（runStrategy:Always）随即重启。**与 workloadUpdateMethods 无关，也与「handler 管不了 1.6.6 launcher」无关**（协议/序列化/ghost record 全兼容，旧结论已撤回）。 | 见 §4 |
 | 5 | 1.6.6 独有、1.2.0 不管理的孤儿资源 | VAP + Binding（node-restriction）、virt-synchronization-controller Deployment。 | 降级后手动删，见 §5 |
 
 ---
@@ -90,59 +90,65 @@ for _, method := range kv.Spec.WorkloadUpdateStrategy.WorkloadUpdateMethods {
 
 空列表 → 两个开关都是 false → 即便 `isOutdated()` 判定 launcher 镜像过期（1.6.6 vs 1.2.0），也**不会**发起迁移或驱逐。`types.go` 注释也明确"空列表 = 不做自动 workload 更新"。所以 **workload-updater 不是根因**。
 
-### 4.2 真正的机制：1.2.0 virt-handler 无法管理 1.6.6 launcher
+### 4.2 先承认你的前提，撤回我上一版的解释
 
-KubeVirt 官方（StarlingX 发行文档）明确写道：
+你的挑战是对的。上一版我写"1.2.0 handler 无法管理 1.6.6 launcher"，但它与你陈述的事实自相矛盾：**升级时 launcher 从不重启 → 它是 1.2.0 handler 拉起的 → 降级后回到 1.2.0 handler，理应还能管它**。我把代码逐行重读了一遍，结论是：**跨版本兼容性根本不是问题**。上一版引用的 StarlingX 那句"older virt-handler cannot manage VMs started by a newer version"在这个场景里**用错了**——它针对的是"新版本 handler 启动的 VM"，而你们的 VM 恰恰不是。
 
-> "KubeVirt does not support downgrades while VMs are running. The older virt-handler binary cannot manage VMs that were started by a newer version. This results in virt-handler entering a requeue loop..."
+逐项验证（全部兼容，推翻"管不了"）：
 
-这与观察到的现象完全吻合。代码链如下（v1.2.0）：
+| 维度 | 结论 |
+|------|------|
+| cmd gRPC 协议 | `cmd.proto` 在 1.6.6 只**新增** `ResetVirtualMachine`、`GetDomainDirtyRateStats` 两个 RPC；`GetDomain`/`SyncVirtualMachine` 等基础 RPC 完全不变。`CmdVersion = 1`、`SupportedCmdVersions = [1]` 两版本一致，版本协商对旧 client 调旧方法零影响。 |
+| socket 路径 | `launcher-sock` 文件名、`/pods/<uid>/volumes/kubernetes.io~empty-dir/sockets/` 路径两版本一致；`FindSocketOnHost` 都按 `vmi.Status.ActivePods` 找。 |
+| domain 序列化 | handler `GetDomain()` 用 `json.Unmarshal` **非 strict**；1.6.6 domain 结构多出的字段（schema.go 350 vs 330 个字段，如 `vmport`、`slice` 等）被 1.2.0 的 `api.Domain` 直接忽略，不影响 `domain.Status.Status` 等关键字段。 |
+| ghost record 磁盘格式 | 两版本都写到 `<VirtPrivateDir>/ghost-records/<uid>`，JSON 字段 `{name, namespace, socketFile, uid}` 完全相同，互相可读。 |
+| **watchdog 文件（关键反证）** | 上一版说"1.6.6 删了 watchdog → 1.2.0 handler 回退失效"。**这是错的**：`pkg/watchdog.WatchdogFileUpdate()` 在 v1.2.0 里**没有任何调用者**（死代码），watchdog 文件从来就没有组件在写。1.2.0 handler 的失联判定 `isLauncherClientUnresponsive` 对 `launcher-sock` 恒走 socket 监控分支（`SocketMonitoringEnabled == true`），watchdog 回退永不触发。 |
 
-**第 1 步：handler 侧把 VMI 判死。** `pkg/virt-handler/vm.go` 的 `calculateVmPhaseForStatusReason`：
+### 4.3 真正的代码链：domain 瞬态缺失 → 硬编码判 Failed
+
+这是两版本**完全一致**的、无保护的一段（v1.2.0 `pkg/virt-handler/vm.go` `calculateVmPhaseForStatusReason`）：
 
 ```go
 if domain == nil {
     switch {
-    case vmi.IsScheduled(): ...
+    case vmi.IsScheduled(): ...          // 仅 Scheduled 阶段才查 socket 是否 unresponsive
     case !vmi.IsRunning() && !vmi.IsFinal():
         return v1.Scheduled, nil
     case !vmi.IsFinal():
-        // That is unexpected. ... if someone directly interacts with libvirt it is possible
-        return v1.Failed, nil
+        // That is unexpected. We should not be able to delete a VirtualMachineInstance before we stop it.
+        // However, if someone directly interacts with libvirt it is possible
+        return v1.Failed, nil            // ← Running 且 domain==nil → 无条件 Failed，不查 socket
     }
 }
 ```
 
-1.2.0 handler 重启后，它的 domain informer（`cache.go` 的 `newListWatchFromNotify` + socket 监控 + `handleStaleSocketConnections`）对 1.6.6 老 launcher 的 domain 感知可能为空；即使能连上 socket 发 `SyncVirtualMachine`，`SyncVMI` 里对 1.6.6 生成的新 domain 结构同步也可能报错（`processVmUpdate` / `handleSyncError`），于是反复 requeue、置 Synchronized=False。一旦走到 `domain == nil && vmi 非 Final` 分支，就返回 `Failed`。
+注意区别：**只有 `Scheduled` 阶段**会去 `isLauncherClientUnresponsive`（查 socket 存活、等 pod 初始化）；一旦 VMI 已是 `Running`，只要 domain informer 里查不到 domain，就**直接判 Failed**，既不等、也不查 launcher 到底死没死。随后 `defaultExecute → updateVMIStatus → setVmPhaseForStatusReason` 把 `Failed` 写回 VMI；VM controller `startStop`（RunStrategyAlways）`if forceRestart || vmi.IsFinal()` → `stopVMI` 删 VMI → 下一轮重建 → virt-launcher pod 重拉。**这就是"降级时 workload 自动重启"**——链路的触发条件只要求「Running VMI + handler 侧 domain 认知短暂为空」，与 launcher 是 1.2.0 还是 1.6.6 无关。
 
-**第 2 步：VM controller 重启 VM。** `pkg/virt-controller/watch/vm.go` 的 `startStop()`，`RunStrategyAlways` 分支：
+### 4.4 那"domain 认知短暂为空"从哪来（升级为何不触发、降级才触发）
 
-```go
-if forceRestart || vmi.IsFinal() {
-    // ... stopping VMI and letting it start in next step
-    vm, err = c.stopVMI(vm, vmi)
-    ...
-}
-```
+这段判定逻辑两版本相同，所以不对称性一定来自 **handler 重启后 domain informer 的冷启动行为差异**。已确认的关键差异：
 
-VMI 进入 Failed → `stopVMI` 删 VMI → 下一轮 reconcile 重建 VMI → virt-launcher pod 按 CR 里已改成 1.2.0 的 `imageTag` 重新拉镜像启动。**这就是"降级时 workload 自动重启"。**
+1. **启动同步门**（`cmd/virt-handler/virt-handler.go`）：
+   - v1.2.0：`cache.WaitForCacheSync(stop, vmiSourceInformer.HasSynced, factory.CRD().HasSynced, factory.KubeVirt().HasSynced)` —— **main 层不等 domain informer**（controller `Run()` 里才等，但 `Run` 是在 main 的 `WaitForCacheSync` 之后才 `go` 起来）。
+   - v1.6.6：`WaitForCacheSync(stop, ..., domainSharedInformer.HasSynced, ...)` —— **main 层显式等 domain informer 完成首轮同步**。
 
-### 4.3 为什么升级不重启、降级才重启（不对称）
+2. **domain informer 首轮 List 的来源**（`pkg/virt-handler/cache/`）：
+   - v1.2.0：`List()` 走 `listAllKnownDomains()`，靠**现场扫描 `/pods`**（`ListAllSockets` 逐 pod 找 `launcher-sock`）再逐个 `client.GetDomain()` 拉 domain。冷启动时依赖 `/pods` 挂载 + 逐 socket gRPC 往返，任何一个环节慢/失败都会让某个 VMI 的 domain 在首轮缺失。
+   - v1.6.6：`List()` 走 **ghost record 全局表**（`GhostRecordGlobalStore`，handler 内存里持久化的、上次从 socket 建立的记录），`listAllKnownDomains` 也从 ghost record 拿 socket 列表。
 
-关键在 `pkg/watchdog`：这个包在 **1.2.0 存在，1.6.6 已整体删除**。
+   即 1.2.0 的 domain 冷启动更"脆"：要现场重新枚举 /pods 并逐 socket GetDomain；1.6.6 先有 ghost record 兜底、再在 main 层等 HasSynced。这能解释**为什么同一台机器、同样的 Running VMI，升级到 1.6.6 时 handler 重启不判死、降级回 1.2.0 时 handler 重启会判死**。
 
-- **升级方向**（1.2.0 → 1.6.6）：1.6.6 的 virt-handler 显式保留了向后兼容路径——legacy socket 目录（`/var/run/kubevirt/sockets`）、legacy watchdog 文件回退、`migrationTransport` 探测等。旧 launcher 继续被新 handler 管理，VM 不重启。
-- **降级方向**（1.6.6 → 1.2.0）：1.2.0 的 virt-handler 不包含对"1.6.6 新 launcher"的兼容代码。1.6.6 launcher 不再写 watchdog 文件（该机制在 1.6.6 已删），而 1.2.0 handler 的 `isLauncherClientUnresponsive` 在 socket 监控失败时会回退到 watchdog 文件判断——对 1.6.6 launcher 这个回退直接失效。管理能力断链 → VMI Failed → 重启。
+> ⚠️ 诚实声明：§4.4 的"冷启动竞态"是**唯一能同时解释升级/降级不对称**的静态证据链，但"某台具体 VM 的 domain 短暂 nil"的确切触发瞬间（首轮 List 慢、某 socket GetDomain 超时、还是 stale socket 误删 domain）需要运行时日志最终钉死。判据很明确：降级窗口内 virt-handler 日志会出现 `VMI is in phase: Running | Domain does not exist` 紧接一条 `VMI ... Failed` 事件，且**没有任何 launcher 崩溃日志**。若你们有这批日志，我可以做最终确认。
 
-补充确认（排除协议层问题）：cmd gRPC 协议在两个版本**基本一致**——`CmdVersion = 1`、`SupportedCmdVersions = [1]`、`cmd/info/info.proto` 完全相同、`notify.proto` 完全相同；`cmd.proto` 只在 1.6.6 多了 `ResetVirtualMachine` 和 `GetDomainDirtyRateStats` 两个 RPC（新增 RPC 不影响旧 client 调用旧方法）。socket 路径（`/pods/<uid>/volumes/kubernetes.io~empty-dir/sockets/launcher-sock`）也一致。**所以不是协议/socket 不兼容，而是 handler 对"新 launcher"的管理能力不兼容。**
+### 4.5 这意味着什么（修复方向）
 
-### 4.4 这意味着什么
+1. **真修在 1.2.0 handler**（不是 1.6.6）：把 `calculateVmPhaseForStatusReason` 里 `case !vmi.IsFinal()` 的 `return v1.Failed` 改成先 `isLauncherClientUnresponsive(vmi)`——launcher 确实失联才 Failed，否则 `Queue.AddAfter(1s)` 等 domain 事件。这样即便 domain 冷启动短暂缺失，也不会误判死、触发 VM controller 硬重启。**这与 launcher 是哪个版本无关，纯 handler 健壮性问题**（上游在 1.6.6 用"main 层等 domain HasSynced"间接规避了，但没有改判定本身）。
+2. 若 1.2.0 是你们维护的定版分支、可以打补丁，上面的改动就是"通过改源码实现降级兼容"的最小正确解法。**注意：在你的场景里（升级时 launcher 没重拉），launcher 本来就是 1.2.0 镜像，降级后 handler 和 launcher 天然同版本，打完补丁就真的可以做到零重启、零迁移地降级**；若 1.2.0 冻结不可改，则只能流程规避（§6 方案 A）。
+3. **改 1.6.6 源码帮不上这个场景**：降级后实际运行的是 1.2.0 handler，1.6.6 侧的兼容 shim（比如让 1.6.6 launcher 重写 legacy watchdog 文件）无法阻止 1.2.0 handler 在 `domain==nil` 时硬判 Failed——何况 watchdog 文件在 1.2.0 本来就是死代码、没人读它。真正该改的、且只需要改的就是 1.2.0 handler 那一个分支。
 
-降级时**没有任何办法让运行中的 1.6.6 virt-launcher 原地平滑降到 1.2.0**。`workloadUpdateMethods` 改不改都一样。唯一正确的做法是：
+### 4.6 为什么官方/StarlingX 说"downgrade 要停 VM"
 
-1. 降级 operator/CR 前，先处理运行中的 VM——要么 `virtctl stop` 停掉，要么先迁到别的节点（如果集群支持，且目标仍是 1.6.6 launcher）；
-2. 对 `runStrategy: Always` 的 VM，即使不主动停，VM controller 也会在 VMI 进入 Failed 后自动重启到 1.2.0 launcher（官方文档明确写了这一点）——**这在生产意味着一次不受控的 VM 重启，务必在维护窗口做，或提前主动停**；
-3. 对 `runStrategy: Manual / RerunOnFailure` 的 VM，降级后需手动 `virtctl start`。
+KubeVirt 官方不承诺支持"VM 运行中降级"，本质是因为 handler 侧的 phase 判定对 domain 认知缺失**零容忍**（`Running && domain==nil → Failed`），任何 handler 冷启动/重连窗口都可能触发。官方把这个限制文档化，而不是去修 handler 的健壮性。所以：**官方语义下，降级前停 VM 是唯一"受支持"的做法；你们若要"不停 VM 降级"，就必须给 1.2.0 handler 打 §4.5 的补丁。**
 
 ---
 
@@ -159,12 +165,20 @@ VMI 进入 Failed → `stopVMI` 删 VMI → 下一轮 reconcile 重建 VMI → v
 
 ## 6. 推荐降级流程
 
-1. **冻结并处理 workload**（最重要，先做）：确认全部运行 VM 的处置策略。生产要求零扰动 → 提前 `virtctl stop`，或迁移；接受重启 → 只对 runStrategy:Always 的 VM 依赖自动重启（会有短暂中断）。
-2. **处理 5 个 storage 版本 CRD**：确认无 snapshot/export/clone CR 实例后，直接 `kubectl delete crd` 这 5 个 CRD（virtualmachinesnapshots / virtualmachinesnapshotcontents / virtualmachinerestores / virtualmachineexports / virtualmachineclones）。1.2.0 operator 随后会自动重建为 v1alpha1-only。
+> 根因已修正（§4）：重启的触发是「Running VMI + 1.2.0 handler 冷启动时 domain 认知短暂为空 → 硬判 Failed」，与 launcher 版本无关。据此，流程有两档选择。
+
+**方案 A（零改动，官方支持路径）**：
+
+1. **先停/冻结全部运行 VM**：`virtctl stop`，或迁到别的节点（若集群支持）。这是官方唯一"受支持"的降级姿势。
+2. **处理 5 个 storage 版本 CRD**：确认无 snapshot/export/clone CR 实例后，直接 `kubectl delete crd`（virtualmachinesnapshots / virtualmachinesnapshotcontents / virtualmachinerestores / virtualmachineexports / virtualmachineclones）。1.2.0 operator 随后自动重建为 v1alpha1-only。
 3. **apply 低版本 operator/CR**（imageTag 指向 1.2.0）。管理面组件滚降级（符合预期）。
 4. **删除孤儿资源**：`kubectl delete validatingadmissionpolicy kubevirt-node-restriction-policy`、`kubectl delete validatingadmissionpolicybinding kubevirt-node-restriction-binding`、`kubectl delete deployment virt-synchronization-controller -n kubevirt`。
 5. **校验**：operator `Deployed`、组件版本、VMI 状态。
-6. **分批重启 VM**到 1.2.0 launcher（维护窗口）。
+6. **分批重启 VM** 到 1.2.0 launcher（维护窗口）。
+
+**方案 B（不停 VM 降级，需改源码）**：
+
+在 1.2.0 handler 打 §4.5 的补丁——`calculateVmPhaseForStatusReason` 的 `case !vmi.IsFinal()` 分支先 `isLauncherClientUnresponsive(vmi)`，launcher 确死才 Failed，否则 requeue 1s 等 domain 事件。这样 Running VMI 在 handler 冷启动窗口内不会被误判死。之后按方案 A 的步骤 2–5 执行即可。**在你的场景下（升级时 launcher 从未重拉 → launcher 是 1.2.0 镜像），补丁后降级全程无需停 VM、无需重启 launcher，天然零扰动。**
 
 ---
 
@@ -176,12 +190,13 @@ VMI 进入 Failed → `stopVMI` 删 VMI → 下一轮 reconcile 重建 VMI → v
 | `pkg/virt-operator/resource/generate/components/crds.go` | 5 个 CRD 的 storage 版本 v1alpha1→v1beta1 |
 | `pkg/virt-operator/resource/apply/crds.go` | `createOrUpdateCrd` 用 `WithReplace("/spec")` 覆盖 spec（降级冲突点） |
 | `pkg/virt-controller/watch/workload-updater/workload-updater.go` | `getUpdateData`：空 methods → 不迁移不驱逐 |
-| `pkg/virt-handler/vm.go`（1.2.0） | `calculateVmPhaseForStatusReason`：domain==nil 且非 Final → Failed |
+| `pkg/virt-handler/vm.go`（1.2.0） | `calculateVmPhaseForStatusReason`：domain==nil 且非 Final → **无条件 Failed**（不查 socket，只 Scheduled 阶段才查）；`defaultExecute`/`updateVMIStatus` 写回 Failed |
 | `pkg/virt-controller/watch/vm.go`（1.2.0） | `startStop` RunStrategyAlways：`vmi.IsFinal()` → stopVMI 重启 |
-| `pkg/watchdog` | 1.2.0 存在、1.6.6 已删除（降级不对称的根源） |
-| `pkg/virt-handler/cache/cache.go`（1.2.0） | socket 监控 + watchdog 回退（对 1.6.6 launcher 失效） |
-| `pkg/handler-launcher-com/cmd/v1/` + `notify/v1/` | 协议层兼容（CmdVersion=1、notify.proto 相同、cmd.proto 仅多 2 个 RPC） |
+| `cmd/virt-handler/virt-handler.go` | **不对称根源**：1.2.0 main 层 `WaitForCacheSync` 不等 domainInformer；1.6.6 显式等 `domainSharedInformer.HasSynced` |
+| `pkg/virt-handler/cache/cache.go`（1.2.0） | domain informer 冷启动靠扫 `/pods` 逐个 GetDomain（脆）；`WatchdogFileUpdate` 是死代码（watchdog 文件无人写） |
+| `pkg/virt-handler/cache/domain-watcher.go`（1.6.6） | domain informer 冷启动靠 ghost record 全局表兜底 |
+| `pkg/handler-launcher-com/cmd/v1/` + `notify/v1/` | 协议层完全兼容（CmdVersion=1、notify.proto 相同、cmd.proto 仅多 2 个 RPC、domain 序列化非 strict） |
 
 ---
 
-*参考：StarlingX 官方文档 [Stop VMs Before Platform Rollback](https://docs.starlingx.io/kube-virt/kubevirt-stop-vms-before-platform-rollback.html)（"KubeVirt does not support downgrades while VMs are running"）、社区 [kubevirt/kubevirt#15018](https://github.com/kubevirt/kubevirt/issues/15018)。*
+*参考：StarlingX 官方文档 [Stop VMs Before Platform Rollback](https://docs.starlingx.io/kube-virt/kubevirt-stop-vms-before-platform-rollback.html)（"KubeVirt does not support downgrades while VMs are running"——其前提是"新版本 handler 启动的 VM"，不适用于本场景中"1.2.0 handler 启动的 VM"）、社区 [kubevirt/kubevirt#15018](https://github.com/kubevirt/kubevirt/issues/15018)。*
