@@ -291,8 +291,8 @@ func NewHandlerDaemonSet(namespace, repository, imagePrefix, version, launcherVe
 		{"libvirt-runtimes", runtimesPath, runtimesPath, nil},
 		{"virt-share-dir", util.VirtShareDir, util.VirtShareDir, &bidi},
 		{"virt-private-dir", util.VirtPrivateDir, util.VirtPrivateDir, nil},
+		{"device-plugin", util.KubeletRoot + "/device-plugins", util.KubeletRoot + "/device-plugins", nil},
 		{"kubelet-pods", kubeletPodsPath, "/pods", nil},
-		{"kubelet", util.KubeletRoot, util.KubeletRoot, &bidi},
 		{"node-labeller", nodeLabellerVolumePath, nodeLabellerVolumePath, nil},
 	}
 

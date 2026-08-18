@@ -36,7 +36,7 @@ type HeartBeat struct {
 
 func NewHeartBeat(clientset k8scli.CoreV1Interface, deviceManager device_manager.DeviceControllerInterface, clusterConfig *virtconfig.ClusterConfig, host string) *HeartBeat {
 	const cpuManagerOS3Path = virtutil.HostRootMount + "var/lib/origin/openshift.local.volumes/cpu_manager_state"
-	const cpuManagerPath = virtutil.KubeletRoot + "/cpu_manager_state"
+	const cpuManagerPath = virtutil.HostRootMount + "var/lib/kubelet/cpu_manager_state"
 	return &HeartBeat{
 		clientset:               clientset,
 		deviceManagerController: deviceManager,
