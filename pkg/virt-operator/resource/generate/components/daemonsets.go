@@ -293,6 +293,7 @@ func NewHandlerDaemonSet(namespace, repository, imagePrefix, version, launcherVe
 		{"virt-private-dir", util.VirtPrivateDir, util.VirtPrivateDir, nil},
 		{"device-plugin", util.KubeletRoot + "/device-plugins", util.KubeletRoot + "/device-plugins", nil},
 		{"kubelet-pods", kubeletPodsPath, "/pods", nil},
+		{"kubelet-pods-full", kubeletPodsPath, kubeletPodsPath, nil},
 		{"node-labeller", nodeLabellerVolumePath, nodeLabellerVolumePath, nil},
 	}
 
